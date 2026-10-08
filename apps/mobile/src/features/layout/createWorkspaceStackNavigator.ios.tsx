@@ -183,17 +183,24 @@ function WorkspaceColumns(
                 unstable_headerRightItems: () =>
                   Platform.OS === "ios" && !Platform.isPad && layout.usesSplitView
                     ? [
-                        {
-                          type: "button",
-                          axisBehavior: "verticalPreferred",
-                          accessibilityLabel: "Search threads",
-                          label: "Search threads",
-                          icon: { type: "sfSymbol", name: "magnifyingglass" },
-                          onPress: () => {
-                            if (!panes.primarySidebarVisible) togglePrimarySidebar();
-                            dispatchHardwareKeyboardCommand("focusSearch");
-                          },
-                        },
+                        ...(!panes.primarySidebarVisible
+                          ? [
+                              {
+                                type: "button" as const,
+                                axisBehavior: "verticalPreferred" as const,
+                                accessibilityLabel: "Search threads",
+                                label: "Search threads",
+                                icon: {
+                                  type: "sfSymbol" as const,
+                                  name: "magnifyingglass" as const,
+                                },
+                                onPress: () => {
+                                  if (!panes.primarySidebarVisible) togglePrimarySidebar();
+                                  dispatchHardwareKeyboardCommand("focusSearch");
+                                },
+                              },
+                            ]
+                          : []),
                         {
                           type: "button",
                           axisBehavior: "verticalPreferred",

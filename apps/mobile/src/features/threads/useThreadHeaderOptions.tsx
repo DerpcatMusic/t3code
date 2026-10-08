@@ -99,7 +99,10 @@ export function useThreadHeaderOptions(props: {
     () => [
       ...threadCenterHeaderItems,
       { type: "spacing", spacing: 8 },
-      ...(layout.usesSplitView && Platform.OS === "ios" && !Platform.isPad
+      ...(layout.usesSplitView &&
+      Platform.OS === "ios" &&
+      !Platform.isPad &&
+      !panes.primarySidebarVisible
         ? [
             withNativeGlassHeaderItem({
               type: "button" as const,
