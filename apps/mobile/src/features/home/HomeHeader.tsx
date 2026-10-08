@@ -10,7 +10,6 @@ import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands
 import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
 import { createNativeMailSearchToolbarItem } from "../layout/native-mail-search-toolbar";
 import { useNativeMailSearchToolbar } from "../../native/use-native-mail-search-toolbar";
-import { NATIVE_WORKSPACE_COLUMNS_SUPPORTED } from "../../native/NativeWorkspaceColumns";
 import { buildHomeListFilterMenu } from "./home-list-filter-menu";
 import { createSidebarHeaderItems } from "../threads/sidebar-native-header-items";
 import type { HomeHeaderProps } from "./HomeHeader.types";
@@ -134,13 +133,6 @@ export function HomeHeader(props: HomeHeaderProps) {
                     autoCapitalize: "none" as const,
                     hideNavigationBar: false,
                     placeholder: "Search",
-                    ...(NATIVE_WORKSPACE_COLUMNS_SUPPORTED
-                      ? {
-                          hideWhenScrolling: false,
-                          placement: "integrated" as const,
-                          allowToolbarIntegration: true,
-                        }
-                      : {}),
                     onCancelButtonPress: () => {
                       props.onSearchQueryChange("");
                     },
@@ -206,7 +198,6 @@ export function HomeHeader(props: HomeHeaderProps) {
               </NativeHeaderToolbar.Menu>
             ) : null}
           </NativeHeaderToolbar.Menu>
-          {NATIVE_WORKSPACE_COLUMNS_SUPPORTED ? <NativeHeaderToolbar.SearchBarSlot /> : null}
           <NativeHeaderToolbar.Spacer flexible />
           <NativeHeaderToolbar.Button
             accessibilityLabel="New task"
