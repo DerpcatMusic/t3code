@@ -20,7 +20,7 @@ import {
   type NativeStackTypeBag,
 } from "@react-navigation/native-stack";
 import { use, useCallback, useEffect, useMemo, useRef, type ComponentProps } from "react";
-import { View } from "react-native";
+import { Platform, View } from "react-native";
 import { Split, type SplitHostCommands } from "react-native-screens";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { scopedThreadKey } from "../../lib/scopedEntities";
@@ -35,6 +35,7 @@ import {
 } from "../../native/createV5StackNavigator.ios";
 import { NATIVE_WORKSPACE_COLUMNS_SUPPORTED } from "../../native/NativeWorkspaceColumns";
 import { V5StackHeader } from "../../native/V5StackHeader.ios";
+import { dispatchHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import {
   nativeWorkspacePopAction,
   projectWorkspaceStack,
@@ -179,6 +180,31 @@ function WorkspaceColumns(
               options={{
                 headerShown: true,
                 title: "",
+                unstable_headerRightItems: () =>
+                  Platform.OS === "ios" && !Platform.isPad && layout.usesSplitView
+                    ? [
+                        {
+                          type: "button",
+                          axisBehavior: "verticalPreferred",
+                          accessibilityLabel: "Search threads",
+                          label: "Search threads",
+                          icon: { type: "sfSymbol", name: "magnifyingglass" },
+                          onPress: () => {
+                            if (!panes.primarySidebarVisible) togglePrimarySidebar();
+                            dispatchHardwareKeyboardCommand("focusSearch");
+                          },
+                        },
+                        {
+                          type: "button",
+                          axisBehavior: "verticalPreferred",
+                          accessibilityLabel: "New task",
+                          label: "New task",
+                          icon: { type: "sfSymbol", name: "square.and.pencil" },
+                          onPress: () =>
+                            props.navigation.navigate("NewTaskSheet", { screen: "NewTask" }),
+                        },
+                      ]
+                    : [],
                 unstable_headerLeftItems: () => [
                   {
                     type: "button",

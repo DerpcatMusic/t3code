@@ -1,9 +1,11 @@
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { useMemo } from "react";
+import { Platform } from "react-native";
 import type { AppNativeStackNavigationOptions } from "../../native/StackHeader";
 import { NATIVE_WORKSPACE_COLUMNS_SUPPORTED } from "../../native/NativeWorkspaceColumns";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
+import { dispatchHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import {
   ThreadGitControls,
   useThreadGitCenterHeaderItems,
@@ -97,6 +99,23 @@ export function useThreadHeaderOptions(props: {
     () => [
       ...threadCenterHeaderItems,
       { type: "spacing", spacing: 8 },
+      ...(layout.usesSplitView && Platform.OS === "ios" && !Platform.isPad
+        ? [
+            withNativeGlassHeaderItem({
+              type: "button" as const,
+              pinned: true,
+              axisBehavior: "verticalPreferred",
+              identifier: "thread-right-search",
+              label: "Search threads",
+              accessibilityLabel: "Search threads",
+              icon: { name: "magnifyingglass", type: "sfSymbol" as const },
+              onPress: () => {
+                if (!panes.primarySidebarVisible) togglePrimarySidebar();
+                dispatchHardwareKeyboardCommand("focusSearch");
+              },
+            }),
+          ]
+        : []),
       withNativeGlassHeaderItem({
         type: "button" as const,
         pinned: true,
@@ -108,7 +127,13 @@ export function useThreadHeaderOptions(props: {
         onPress: () => navigation.navigate("NewTaskSheet", { screen: "NewTask" }),
       }),
     ],
-    [navigation, threadCenterHeaderItems],
+    [
+      navigation,
+      threadCenterHeaderItems,
+      layout.usesSplitView,
+      panes.primarySidebarVisible,
+      togglePrimarySidebar,
+    ],
   );
 
   const options: AppNativeStackNavigationOptions = {
