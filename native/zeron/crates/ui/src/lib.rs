@@ -197,7 +197,9 @@ pub fn run_app(config: UiConfig) {
         appshots::set_enabled(ui_settings.appshots_enabled);
         terminal::panel::init(cx);
         app_menus::init(cx);
-        app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
+        if std::env::var_os("ZERON_T3_CONNECTION").is_none() {
+            app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
+        }
         cx.register_url_scheme("zeron").detach();
 
         let state = cx.new(|_| state::AppState::new());

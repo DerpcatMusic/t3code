@@ -13249,6 +13249,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-t3"
+version = "0.2.106"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+ "uuid",
+ "zeron-doc",
+ "zeron-proto",
+ "zeron-rpc",
+]
+
+[[package]]
 name = "zeron-text"
 version = "0.2.106"
 dependencies = [
@@ -13345,6 +13367,7 @@ dependencies = [
  "zeron-proto",
  "zeron-rpc",
  "zeron-syntax",
+ "zeron-t3",
  "zeron-theme",
  "zeron-update",
  "zeron-veil",

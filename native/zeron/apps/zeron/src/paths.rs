@@ -11,6 +11,7 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
     if let Some(dir) = env("ZERON_DATA_DIR") {
         return PathBuf::from(dir);
     }
+    let t3 = env("ZERON_T3_CONNECTION").is_some();
     #[cfg(windows)]
     {
         // Explorer does not set HOME. Do not let a shell-specific HOME select
@@ -25,11 +26,14 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
                     .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             })
             .expect("LOCALAPPDATA and USERPROFILE not set; set ZERON_DATA_DIR");
-        local.join("Zeron")
+        local.join(if t3 { "Zeron T3" } else { "Zeron" })
     }
     #[cfg(not(windows))]
     {
         let home = PathBuf::from(env("HOME").expect("HOME not set"));
+        if t3 {
+            return home.join(".zeron-t3");
+        }
         let dir = home.join(".zeron");
         // One-shot 0.2.0 migration: adopt the pre-rename data dir.
         if !dir.exists() {
@@ -59,6 +63,18 @@ mod tests {
         assert_eq!(
             resolve(&[("ZERON_DATA_DIR", "custom data")]),
             PathBuf::from("custom data")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn t3_mode_keeps_existing_zeron_storage_separate() {
+        assert_eq!(
+            resolve(&[
+                ("HOME", "/home/example"),
+                ("ZERON_T3_CONNECTION", "/connection.json")
+            ]),
+            PathBuf::from("/home/example/.zeron-t3")
         );
     }
 

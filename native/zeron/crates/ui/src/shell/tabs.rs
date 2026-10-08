@@ -402,8 +402,25 @@ impl Shell {
             };
             surface + widths.files_controls
         };
-        let available_titlebar_width =
-            (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
+        let t3_details = self
+            .state
+            .read(cx)
+            .selected_chat
+            .as_ref()
+            .and_then(|id| self.state.read(cx).t3_details.get(id))
+            .cloned();
+        let details_width = if t3_details.is_some() && !takeover {
+            190.0
+        } else {
+            0.0
+        };
+        let available_titlebar_width = (self.viewport_width
+            - row_left
+            - right_pad
+            - trailing_width
+            - details_width
+            - row_gap * 3.0)
+            .max(0.0);
 
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
@@ -634,6 +651,43 @@ impl Shell {
             .child(div().flex_1())
             .children(session_controls)
             .children(actions)
+            .when_some(t3_details.filter(|_| !takeover), |el, details| {
+                let branch = details.branch.as_deref().unwrap_or("Workspace");
+                let context = details
+                    .context_tokens
+                    .map(|tokens| format!(" · {tokens} context tokens"))
+                    .unwrap_or_default();
+                el.child(
+                    div()
+                        .w(px(190.0))
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .role(gpui::Role::Group)
+                        .aria_label("T3 workspace and agents")
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text)
+                                .child(gpui::SharedString::from(format!(
+                                    "{branch} · {}/{} agents",
+                                    details.active_agents, details.total_agents
+                                ))),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(10.0))
+                                .text_color(theme.text_muted)
+                                .child(gpui::SharedString::from(format!(
+                                    "{}{context}",
+                                    details.model
+                                ))),
+                        ),
+                )
+            })
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE

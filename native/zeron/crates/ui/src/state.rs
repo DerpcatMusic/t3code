@@ -270,6 +270,24 @@ impl EngineBackend for RemoteEngine {
     }
 }
 
+/// Native view into one T3 environment; it does not own the server.
+struct T3Engine {
+    service: Arc<zeron_t3::T3Service>,
+    client: RpcClient,
+}
+
+#[async_trait]
+impl EngineBackend for T3Engine {
+    fn client(&self) -> &RpcClient {
+        &self.client
+    }
+    fn mode(&self) -> EngineMode {
+        EngineMode::Remote { url: self.service.origin.clone() }
+    }
+    // Closing a native viewport must never stop the T3 environment or its agents.
+    async fn shutdown(&self) {}
+}
+
 /// Cheaply clonable handle to whichever backend won the probe.
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -287,6 +305,16 @@ impl EngineHandle {
     /// Must run on the tokio runtime (`Tokio::spawn`): both transports spawn
     /// tokio tasks.
     pub async fn bootstrap(config: EngineBootConfig) -> anyhow::Result<EngineHandle> {
+        if let Some(path) = std::env::var_os("ZERON_T3_CONNECTION") {
+            let service = zeron_t3::T3Service::connect(std::path::Path::new(&path)).await?;
+            let client = memory_client(service.clone());
+            let engine_info = service.engine_info.clone();
+            return Ok(Self {
+                inner: Arc::new(T3Engine { service, client }),
+                engine_info,
+                deferred_state: None,
+            });
+        }
         // Invariant: at most one bootstrap in this process runs probe+embed at
         // a time. The winner binds the deferred IPC listener before releasing
         // the gate, so a concurrent viewport's probe finds it and attaches as
@@ -711,6 +739,7 @@ pub struct AppState {
     pub(crate) connectivity_observed: bool,
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
+    pub t3_details: HashMap<String, zeron_t3::ThreadDetails>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     /// Fork RPC may arrive ahead of its registry row on a remote device.
@@ -848,6 +877,7 @@ impl AppState {
             connectivity: zeron_proto::Connectivity::default(),
             connectivity_observed: false,
             spaces: Vec::new(),
+            t3_details: HashMap::new(),
             chats: Vec::new(),
             pending_side_chat: None,
             unsaved_side_chat: false,
@@ -1074,6 +1104,7 @@ impl AppState {
         }
         sort_chats(&mut chats);
         self.chats = chats;
+        self.t3_details.retain(|id, _| self.chats.iter().any(|chat| &chat.id == id));
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         self.chats_synced = true;
         self.transcript_cache
@@ -3069,6 +3100,8 @@ fn spawn_transcript_watch(
                     .get("historyPending")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let t3_details = value.get("t3Details").cloned()
+                    .and_then(|details| serde_json::from_value::<zeron_t3::ThreadDetails>(details).ok());
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
@@ -3097,6 +3130,12 @@ fn spawn_transcript_watch(
                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
                         if history_pending && state.transcript_replayed {
                             return;
+                        }
+                        if let Some(details) = t3_details {
+                            if state.t3_details.get(&chat_id) != Some(&details) {
+                                state.t3_details.insert(chat_id.clone(), details);
+                                cx.notify();
+                            }
                         }
                         if let Err(err) =
                             state.receive_opening_transcript_update(update, history_pending, cx)

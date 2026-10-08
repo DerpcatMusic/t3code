@@ -151,6 +151,10 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
+    anyhow::ensure!(
+        std::env::var_os("ZERON_T3_CONNECTION").is_none() || cli.command.is_none(),
+        "T3 connection mode is headed-only; run T3's CLI for environment operations"
+    );
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         zeron_update::windows::wait_for_exit(pid)?;
