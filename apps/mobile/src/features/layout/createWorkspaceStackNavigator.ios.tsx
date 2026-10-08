@@ -154,7 +154,7 @@ function WorkspaceColumns(
       }}
       columnMetrics={{
         minimumPrimaryColumnWidth: 280,
-        maximumPrimaryColumnWidth: 380,
+        maximumPrimaryColumnWidth: Math.max(380, layout.listPaneWidth ?? 0),
         preferredPrimaryColumnWidthOrFraction: layout.listPaneWidth ?? 320,
         minimumSecondaryColumnWidth: 320,
       }}

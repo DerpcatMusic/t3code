@@ -88,6 +88,13 @@ describe("Duo workspace sizing", () => {
         safeArea: { top: 0, bottom: 20, left: 59, right: 59 },
       };
       expect(deriveLayout({ ...metrics, nativeMetrics: metrics }).usesSplitView).toBe(false);
+      const cameraMetrics = {
+        ...metrics,
+        reservedRegions: [{ kind: "occlusion" as const, x: 0, y: 0, width: 60, height: 60 }],
+      };
+      expect(deriveLayout({ ...cameraMetrics, nativeMetrics: cameraMetrics }).usesSplitView).toBe(
+        false,
+      );
     }
     expect(
       deriveLayout({

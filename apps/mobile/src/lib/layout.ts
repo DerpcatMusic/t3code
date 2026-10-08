@@ -100,7 +100,9 @@ export function deriveLayout(input: {
   // UIKit's size class supports the shorter Duo inner display. Geometry remains
   // a floor so a narrow multitasking window cannot squeeze both columns.
   const hasDuoGeometry =
-    metrics && (metrics.verticalBarEdge !== "none" || metrics.reservedRegions.length > 0);
+    metrics &&
+    (metrics.verticalBarEdge !== "none" ||
+      metrics.reservedRegions.some((region) => region.kind === "division"));
   const wideEnoughForSplit = hasDuoGeometry
     ? metrics.horizontalSizeClass === "regular" &&
       usableWidth >= SPLIT_SIDEBAR_MIN_WIDTH + 320 &&

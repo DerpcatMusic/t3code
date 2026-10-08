@@ -3138,7 +3138,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             // Let UIKit adjust the scrolling axis without shifting content sideways.
             contentInsetAdjustmentBehavior={
               usesNativeAutomaticInsets
-                ? NATIVE_WORKSPACE_COLUMNS_SUPPORTED && props.layoutVariant === "split"
+                ? NATIVE_WORKSPACE_COLUMNS_SUPPORTED &&
+                  Platform.OS === "ios" &&
+                  !Platform.isPad &&
+                  props.layoutVariant === "split"
                   ? "scrollableAxes"
                   : "automatic"
                 : "never"
