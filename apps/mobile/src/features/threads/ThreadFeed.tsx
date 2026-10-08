@@ -1732,11 +1732,21 @@ function renderFeedEntry(
             className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5"
             style={{
               backgroundColor: userBubbleColor,
-              maxWidth: NATIVE_WORKSPACE_COLUMNS_SUPPORTED ? "85%" : props.userBubbleMaxWidth,
+              maxWidth:
+                NATIVE_WORKSPACE_COLUMNS_SUPPORTED && Platform.OS === "ios" && !Platform.isPad
+                  ? "85%"
+                  : props.userBubbleMaxWidth,
               ...(hasReviewCommentContext
                 ? { width: props.reviewCommentBubbleWidth }
                 : hasWideBlock
-                  ? { width: NATIVE_WORKSPACE_COLUMNS_SUPPORTED ? "85%" : props.userBubbleMaxWidth }
+                  ? {
+                      width:
+                        NATIVE_WORKSPACE_COLUMNS_SUPPORTED &&
+                        Platform.OS === "ios" &&
+                        !Platform.isPad
+                          ? "85%"
+                          : props.userBubbleMaxWidth,
+                    }
                   : null),
             }}
           >

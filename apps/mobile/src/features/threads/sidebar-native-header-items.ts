@@ -46,7 +46,6 @@ export function createSidebarHeaderItems(input: {
     withNativeGlassHeaderItem({
       type: "menu",
       axisBehavior: "horizontalOnly",
-      pinned: true,
       label: "",
       accessibilityLabel: "Filter threads",
       icon: sfSymbolIcon(input.filterIcon),
@@ -58,7 +57,6 @@ export function createSidebarHeaderItems(input: {
     withNativeGlassHeaderItem({
       type: "button",
       axisBehavior: "horizontalOnly",
-      pinned: true,
       label: "Settings",
       accessibilityLabel: "Open settings",
       icon: sfSymbolIcon("gearshape"),

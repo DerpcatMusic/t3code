@@ -9,6 +9,7 @@ const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
+const isIosDuoBuild = repoEnv.T3CODE_IOS_DUO_BUILD === "1";
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
@@ -264,11 +265,16 @@ const config: ExpoConfig = {
       "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
     },
     infoPlist: {
-      UISupportedInterfaceOrientations: [
-        "UIInterfaceOrientationPortrait",
-        "UIInterfaceOrientationLandscapeLeft",
-        "UIInterfaceOrientationLandscapeRight",
-      ],
+      T3DuoEnabled: isIosDuoBuild,
+      ...(isIosDuoBuild
+        ? {
+            UISupportedInterfaceOrientations: [
+              "UIInterfaceOrientationPortrait",
+              "UIInterfaceOrientationLandscapeLeft",
+              "UIInterfaceOrientationLandscapeRight",
+            ],
+          }
+        : {}),
       NSAppTransportSecurity: {
         NSAllowsArbitraryLoads: true,
       },

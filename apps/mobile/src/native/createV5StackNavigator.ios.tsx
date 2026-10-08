@@ -24,6 +24,7 @@ import { useCallback, useRef, useState, type ComponentProps } from "react";
 import { StyleSheet, View } from "react-native";
 import { FormSheet, Stack } from "react-native-screens";
 import { V5StackHeader } from "./V5StackHeader.ios";
+import type { AppNativeStackNavigationOptions } from "./StackHeader";
 import { NativeColumnContent } from "./NativeColumnContent.ios";
 import {
   nativeStackPopAction,
@@ -232,9 +233,11 @@ export function V5CardStackView(props: V5StackViewProps) {
                         : index > 0
                     }
                   />
-                  {/* These Settings routes host navigators; the leaf screen owns the bar inset. */}
                   <NativeColumnContent
-                    insetHorizontally={!["SettingsSheet", "SettingsContent"].includes(route.name)}
+                    insetHorizontally={
+                      (descriptor.options as AppNativeStackNavigationOptions)
+                        .nativeContentInsetHorizontally
+                    }
                   >
                     {descriptor.render()}
                   </NativeColumnContent>

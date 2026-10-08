@@ -5,7 +5,6 @@ type NativeGlassHeaderItem = {
   readonly sharesBackground?: boolean;
   readonly variant?: "plain" | "done" | "prominent";
   readonly axisBehavior?: "automatic" | "horizontalOnly" | "verticalPreferred";
-  readonly pinned?: boolean;
   readonly width?: number;
 };
 

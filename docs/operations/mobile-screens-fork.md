@@ -20,3 +20,10 @@ Run `pack:t3` from that clean checkout and tag the source as `t3-v<version>`.
 Replace the old archive, update `apps/mobile/package.json` and run `vp i` to
 regenerate the lockfile. Verify mobile types and affected navigation tests.
 Changes to native source also require rebuilding and testing the native client.
+
+Duo previews use the same Expo app with an explicit native build opt-in. Build
+with the `preview:duo` EAS profile, or set `T3CODE_IOS_DUO_BUILD=1` when running
+`node scripts/mobile-native-client.ts ensure ios <duo-simulator-id>` locally.
+The opt-in enables phone workspace columns and landscape rotation and uses the
+`preview-duo` update channel; ordinary builds keep portrait-only iPhone behavior.
+Rebuild when changing it: an OTA cannot change this native setting.

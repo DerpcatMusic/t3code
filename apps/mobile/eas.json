@@ -57,6 +57,13 @@
       "channel": "production",
       "environment": "production",
       "autoIncrement": true
+    },
+    "preview:duo": {
+      "extends": "preview",
+      "channel": "preview-duo",
+      "env": {
+        "T3CODE_IOS_DUO_BUILD": "1"
+      }
     }
   },
   "submit": {

@@ -76,6 +76,19 @@ describe("Duo workspace sizing", () => {
 
   it("keeps an ordinary phone compact when it rotates", () => {
     expect(deriveLayout({ width: 852, height: 393 }).usesSplitView).toBe(false);
+    for (const [width, height] of [
+      [932, 430],
+      [650, 500],
+    ]) {
+      const metrics: NativeLayoutMetrics = {
+        ...innerDisplay,
+        width: width!,
+        height: height!,
+        verticalBarEdge: "none",
+        safeArea: { top: 0, bottom: 20, left: 59, right: 59 },
+      };
+      expect(deriveLayout({ ...metrics, nativeMetrics: metrics }).usesSplitView).toBe(false);
+    }
     expect(
       deriveLayout({
         width: 960,

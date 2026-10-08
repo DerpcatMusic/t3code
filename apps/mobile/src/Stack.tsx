@@ -192,6 +192,9 @@ const LEGAL_DOCUMENT_HEADER_OPTIONS: AppScreenOptions = {
   presentation: "fullScreenModal",
 };
 
+// A navigator container leaves horizontal safe-area handling to its leaf screens.
+const NESTED_NAVIGATOR_OPTIONS = { nativeContentInsetHorizontally: false, headerShown: false };
+
 const SettingsContentStack = createV5SheetStackNavigator({
   initialRouteName: "Settings",
   screenOptions: {
@@ -410,6 +413,7 @@ const SettingsSheetStack = createV5SheetStackNavigator({
   screens: {
     SettingsContent: createNativeStackScreen({
       screen: SettingsContentStack,
+      options: NESTED_NAVIGATOR_OPTIONS,
       linking: "",
       layout: ({ children }) => (
         <SettingsEnvironmentFilterProvider>
@@ -845,6 +849,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       screen: SettingsSheetStack,
       linking: "settings",
       options: {
+        ...NESTED_NAVIGATOR_OPTIONS,
         gestureEnabled: true,
         headerShown: false,
       },
@@ -911,6 +916,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
         </GuardedScreenLayout>
       ),
       options: {
+        ...NESTED_NAVIGATOR_OPTIONS,
         gestureEnabled: true,
         headerShown: false,
       },

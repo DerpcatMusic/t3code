@@ -109,7 +109,6 @@ export function useThreadHeaderOptions(props: {
         ? [
             withNativeGlassHeaderItem({
               type: "button" as const,
-              pinned: true,
               axisBehavior: "verticalPreferred",
               identifier: "thread-right-search",
               label: "Search threads",
@@ -123,7 +122,6 @@ export function useThreadHeaderOptions(props: {
         : []),
       withNativeGlassHeaderItem({
         type: "button" as const,
-        pinned: true,
         axisBehavior: "verticalPreferred",
         identifier: "thread-right-new-task",
         label: "New task",
