@@ -195,7 +195,6 @@ function WorkspaceColumns(
                                   name: "magnifyingglass" as const,
                                 },
                                 onPress: () => {
-                                  if (!panes.primarySidebarVisible) togglePrimarySidebar();
                                   dispatchHardwareKeyboardCommand("focusSearch");
                                 },
                               },

@@ -14,6 +14,9 @@ import {
 
 type NativeHeaderItems = ReadonlyArray<Record<string, unknown>>;
 
+const usesDuoHeader =
+  NATIVE_WORKSPACE_COLUMNS_SUPPORTED && Platform.OS === "ios" && !Platform.isPad;
+
 export function useThreadHeaderOptions(props: {
   readonly title: string;
   readonly subtitle: string;
@@ -28,7 +31,7 @@ export function useThreadHeaderOptions(props: {
   const compactRightHeaderItems = useThreadGitRightHeaderItems(props.gitControls);
   const splitLeftHeaderItems = useMemo<NativeHeaderItems>(
     () => [
-      ...(!NATIVE_WORKSPACE_COLUMNS_SUPPORTED
+      ...(!usesDuoHeader
         ? [
             {
               // Match Mail's split-view detail toolbar: the first detail action sits
@@ -63,7 +66,7 @@ export function useThreadHeaderOptions(props: {
         onPress: togglePrimarySidebar,
         type: "button" as const,
       }),
-      ...(!NATIVE_WORKSPACE_COLUMNS_SUPPORTED
+      ...(!usesDuoHeader
         ? [
             withNativeGlassHeaderItem({
               accessibilityLabel: "New task",
@@ -113,7 +116,6 @@ export function useThreadHeaderOptions(props: {
               accessibilityLabel: "Search threads",
               icon: { name: "magnifyingglass", type: "sfSymbol" as const },
               onPress: () => {
-                if (!panes.primarySidebarVisible) togglePrimarySidebar();
                 dispatchHardwareKeyboardCommand("focusSearch");
               },
             }),
@@ -130,13 +132,7 @@ export function useThreadHeaderOptions(props: {
         onPress: () => navigation.navigate("NewTaskSheet", { screen: "NewTask" }),
       }),
     ],
-    [
-      navigation,
-      threadCenterHeaderItems,
-      layout.usesSplitView,
-      panes.primarySidebarVisible,
-      togglePrimarySidebar,
-    ],
+    [navigation, threadCenterHeaderItems, layout.usesSplitView, panes.primarySidebarVisible],
   );
 
   const options: AppNativeStackNavigationOptions = {
@@ -162,7 +158,7 @@ export function useThreadHeaderOptions(props: {
     // the git controls on the RIGHT (no center items — center space is
     // reserved for future breadcrumbs/status).
     unstable_headerRightItems: () =>
-      NATIVE_WORKSPACE_COLUMNS_SUPPORTED
+      usesDuoHeader
         ? duoRightHeaderItems
         : layout.usesSplitView
           ? threadCenterHeaderItems

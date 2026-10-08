@@ -5,5 +5,5 @@ const nativeControls = requireOptionalNativeModule<{ readonly supportsWorkspaceC
 );
 export const NATIVE_WORKSPACE_COLUMNS_SUPPORTED =
   Platform.OS === "ios" &&
-  (Platform.isPad || Number(Platform.Version) >= 27.1) &&
+  (Platform.isPad || Number.parseFloat(String(Platform.Version)) >= 27.1) &&
   nativeControls?.supportsWorkspaceColumns === true;

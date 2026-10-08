@@ -20,7 +20,7 @@ export type { HomeHeaderEnvironment } from "./HomeHeader.types";
 
 export function HomeHeader(props: HomeHeaderProps) {
   const navigation = useNavigation<NativeStackNavigationProp<ParamListBase>>();
-  const { panes } = useAdaptiveWorkspaceLayout();
+  const { panes, togglePrimarySidebar } = useAdaptiveWorkspaceLayout();
   const usesNativeMailSearchToolbar = useNativeMailSearchToolbar();
   const primaryColumn = use(NativePrimaryColumnContext);
   const sidebarHeader =
@@ -48,11 +48,12 @@ export function HomeHeader(props: HomeHeaderProps) {
   const focusSearch = useCallback(() => {
     if (primaryColumn && !panes.primarySidebarVisible) {
       focusAfterReveal.current = true;
+      togglePrimarySidebar();
       return true;
     }
     searchBarRef.current?.focus();
     return searchBarRef.current !== null;
-  }, [primaryColumn, panes.primarySidebarVisible]);
+  }, [primaryColumn, panes.primarySidebarVisible, togglePrimarySidebar]);
   useHardwareKeyboardCommand("focusSearch", focusSearch);
   const filterMenu = buildHomeListFilterMenu(props);
 

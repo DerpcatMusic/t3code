@@ -1,6 +1,6 @@
 import type { HeaderBarButtonMailSearchToolbarItem } from "react-native-screens";
 import { useId } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, Platform, View } from "react-native";
 import { createNativeHeaderMenu } from "./nativeHeaderMenu.ios";
 import { ScreenHeaderButton } from "./ScreenHeaderButton";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../native/StackHeader";
@@ -120,7 +120,9 @@ export function ScreenHeader(props: ScreenHeaderProps) {
             />
           ) : null}
           {props.sidebar !== false &&
-          (!NATIVE_WORKSPACE_COLUMNS_SUPPORTED || !panes.primarySidebarVisible) ? (
+          (!NATIVE_WORKSPACE_COLUMNS_SUPPORTED ||
+            (Platform.OS === "ios" && Platform.isPad) ||
+            !panes.primarySidebarVisible) ? (
             <ScreenHeaderButton
               axisBehavior={NATIVE_WORKSPACE_COLUMNS_SUPPORTED ? "horizontalOnly" : undefined}
               accessibilityLabel={
