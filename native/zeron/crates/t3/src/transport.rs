@@ -125,7 +125,7 @@ impl ConnectionConfig {
         let (incoming, input) = mpsc::channel::<String>(256);
         let (closed_tx, closed) = watch::channel(false);
         let client = Arc::new(RpcClient::new(out, input));
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let (mut writer, mut reader) = ws.split();
             let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
             let mut last_pong = tokio::time::Instant::now();
@@ -172,13 +172,24 @@ impl ConnectionConfig {
             }
             let _ = closed_tx.send(true);
         });
-        Ok(Session { client, closed })
+        Ok(Session {
+            client,
+            closed,
+            task,
+        })
     }
 }
 
 pub struct Session {
     pub client: Arc<RpcClient>,
     pub closed: watch::Receiver<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 pub fn validate_descriptor(descriptor: &Value, expected: &str) -> Result<()> {
@@ -252,6 +263,38 @@ fn response_frames(frame: &Value) -> Result<(Vec<Value>, Option<Value>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_a_session_stops_its_background_transport() {
+        struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0.take() {
+                    let _ = signal.send(());
+                }
+            }
+        }
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (stopped, done) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _signal = SignalOnDrop(Some(stopped));
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        let (out, _outgoing) = mpsc::channel(1);
+        let (_incoming, input) = mpsc::channel(1);
+        let session = Session {
+            client: Arc::new(RpcClient::new(out, input)),
+            closed: watch::channel(false).1,
+            task,
+        };
+        drop(session);
+        tokio::time::timeout(Duration::from_secs(1), done)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn effect_frames_preserve_errors_acknowledgements_and_cancellation() {

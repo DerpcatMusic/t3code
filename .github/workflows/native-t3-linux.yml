@@ -70,6 +70,7 @@ jobs:
           cp LICENSE "$native_bundle/LICENSE-Zeron"
           cp ../../LICENSE "$native_bundle/LICENSE-T3"
           cp "$ORT_LIB_LOCATION/LICENSE" "$native_bundle/LICENSE-ONNX-Runtime"
+          cp "$ORT_LIB_LOCATION/ThirdPartyNotices.txt" "$native_bundle/ONNX-ThirdPartyNotices.txt"
           cp ../README.md "$native_bundle/README.md"
           sh -n "$native_bundle/native-t3"
           if env -u ZERON_T3_CONNECTION "$native_bundle/native-t3" --version; then

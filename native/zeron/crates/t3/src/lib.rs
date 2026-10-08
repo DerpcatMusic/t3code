@@ -687,7 +687,8 @@ impl RpcService for T3Service {
                 })
                 .chain(stream::once(async { (true, None) }));
                 let events = Box::pin(stream::select(thread_events, git_events));
-                let worktree = thread["worktreePath"].clone();
+                let workspace_binding =
+                    (thread["projectId"].clone(), thread["worktreePath"].clone());
                 let stream = stream::unfold(
                     (
                         events,
@@ -695,9 +696,16 @@ impl RpcService for T3Service {
                         Vec::new(),
                         environment,
                         None::<GitStats>,
-                        worktree,
+                        workspace_binding,
                     ),
-                    |(mut rx, mut projection, mut previous, environment, mut git, worktree)| async move {
+                    |(
+                        mut rx,
+                        mut projection,
+                        mut previous,
+                        environment,
+                        mut git,
+                        workspace_binding,
+                    )| async move {
                         loop {
                             let (git_event, frame) = rx.next().await?;
                             if !git_event && frame.is_none() {
@@ -737,11 +745,19 @@ impl RpcService for T3Service {
                                 };
                                 // Rebind Git to the new checkout after a T3 worktree handoff.
                                 ensure!(
-                                    projection.value["thread"]["worktreePath"] == worktree,
+                                    projection.value["thread"]["projectId"] == workspace_binding.0
+                                        && projection.value["thread"]["worktreePath"]
+                                            == workspace_binding.1,
                                     "T3 workspace changed; resubscribe"
                                 );
                                 let baseline = if snapshot {
                                     Some(projection.entries(&environment)?)
+                                } else {
+                                    None
+                                };
+                                let frame_update = if let Some(next) = &baseline {
+                                    previous = next.clone();
+                                    TranscriptFrame::reset(next)
                                 } else if git_event {
                                     TranscriptFrame::Delta {
                                         upsert: vec![],
@@ -749,12 +765,6 @@ impl RpcService for T3Service {
                                         remove: vec![],
                                         count: previous.len(),
                                     }
-                                } else {
-                                    None
-                                };
-                                let frame_update = if let Some(next) = &baseline {
-                                    previous = next.clone();
-                                    TranscriptFrame::reset(next)
                                 } else {
                                     projection.transcript_delta(
                                         &frame,
@@ -784,7 +794,14 @@ impl RpcService for T3Service {
                                 Ok(Some(value)) => {
                                     return Some((
                                         value,
-                                        (rx, projection, previous, environment, git, worktree),
+                                        (
+                                            rx,
+                                            projection,
+                                            previous,
+                                            environment,
+                                            git,
+                                            workspace_binding,
+                                        ),
                                     ));
                                 }
                                 Ok(None) => continue,
