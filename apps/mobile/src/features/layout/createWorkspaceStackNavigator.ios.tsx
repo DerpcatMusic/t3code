@@ -35,6 +35,7 @@ import {
 } from "../../native/createV5StackNavigator.ios";
 import { NATIVE_WORKSPACE_COLUMNS_SUPPORTED } from "../../native/NativeWorkspaceColumns";
 import { V5StackHeader } from "../../native/V5StackHeader.ios";
+import type { AppNativeStackNavigationOptions } from "../../native/StackHeader";
 import { dispatchHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import {
   nativeWorkspacePopAction,
@@ -90,7 +91,12 @@ function ColumnScreen(props: {
             canGoBack={!props.primary}
             primary={props.primary}
           />
-          <ColumnContent primary={props.primary}>
+          <ColumnContent
+            primary={props.primary}
+            insetHorizontally={
+              (descriptor.options as AppNativeStackNavigationOptions).nativeContentInsetHorizontally
+            }
+          >
             <NativePrimaryColumnContext value={primaryColumn}>
               {descriptor.render()}
             </NativePrimaryColumnContext>
