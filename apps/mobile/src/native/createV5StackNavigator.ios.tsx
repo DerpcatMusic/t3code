@@ -232,7 +232,12 @@ export function V5CardStackView(props: V5StackViewProps) {
                         : index > 0
                     }
                   />
-                  <NativeColumnContent>{descriptor.render()}</NativeColumnContent>
+                  {/* These Settings routes host navigators; the leaf screen owns the bar inset. */}
+                  <NativeColumnContent
+                    insetHorizontally={!["SettingsSheet", "SettingsContent"].includes(route.name)}
+                  >
+                    {descriptor.render()}
+                  </NativeColumnContent>
                 </NavigationRouteContext>
               </NavigationContext>
             </Stack.Screen>
