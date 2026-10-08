@@ -410,7 +410,7 @@ impl Shell {
             .and_then(|id| self.state.read(cx).t3_details.get(id))
             .cloned();
         let details_width = if t3_details.is_some() && !takeover {
-            190.0
+            240.0
         } else {
             0.0
         };
@@ -652,14 +652,18 @@ impl Shell {
             .children(session_controls)
             .children(actions)
             .when_some(t3_details.filter(|_| !takeover), |el, details| {
-                let branch = details.branch.as_deref().unwrap_or("Workspace");
+                let branch = details.git.as_ref().and_then(|git| git.branch.as_deref())
+                    .or(details.branch.as_deref()).unwrap_or("Workspace");
+                let changes = details.git.as_ref()
+                    .map(|git| format!("+{} / −{}", git.additions, git.deletions))
+                    .unwrap_or_default();
                 let context = details
                     .context_tokens
-                    .map(|tokens| format!(" · {tokens} context tokens"))
+                    .map(|tokens| format!(" · {tokens} ctx"))
                     .unwrap_or_default();
                 el.child(
                     div()
-                        .w(px(190.0))
+                        .w(px(240.0))
                         .flex_none()
                         .flex()
                         .flex_col()
@@ -668,23 +672,21 @@ impl Shell {
                         .aria_label("T3 workspace and agents")
                         .child(
                             div()
-                                .truncate()
+                                .flex()
+                                .gap(px(6.0))
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text)
-                                .child(gpui::SharedString::from(format!(
-                                    "{branch} · {}/{} agents",
-                                    details.active_agents, details.total_agents
-                                ))),
+                                .child(div().flex_1().min_w_0().truncate().child(gpui::SharedString::from(branch.to_owned())))
+                                .child(div().flex_none().child(gpui::SharedString::from(changes))),
                         )
                         .child(
                             div()
-                                .truncate()
+                                .flex()
+                                .gap(px(6.0))
                                 .text_size(crate::typography::ui_rems(10.0))
                                 .text_color(theme.text_muted)
-                                .child(gpui::SharedString::from(format!(
-                                    "{}{context}",
-                                    details.model
-                                ))),
+                                .child(div().flex_1().min_w_0().truncate().child(gpui::SharedString::from(format!("{}{context}", details.model))))
+                                .child(div().flex_none().child(gpui::SharedString::from(format!("{}/{} agents", details.active_agents, details.total_agents)))),
                         ),
                 )
             })

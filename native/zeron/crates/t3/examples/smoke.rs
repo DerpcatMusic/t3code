@@ -7,9 +7,15 @@ use zeron_rpc::{memory_client, methods};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let path = std::env::args_os()
-        .nth(1)
-        .context("usage: smoke <connection.json>")?;
+    let mut args = std::env::args_os().skip(1);
+    let path = args
+        .next()
+        .context("usage: smoke <connection.json> [thread-id]")?;
+    let thread_id = args
+        .next()
+        .map(|id| id.into_string())
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("invalid thread id"))?;
     tokio::time::timeout(std::time::Duration::from_secs(45), async {
         let service = zeron_t3::T3Service::connect(std::path::Path::new(&path)).await?;
         let client = memory_client(service);
@@ -51,16 +57,47 @@ async fn main() -> Result<()> {
                 "thread lost its project"
             );
         }
-        if let Some(chat) = chats.first() {
+        let chat = if let Some(id) = thread_id {
+            chats
+                .iter()
+                .find(|chat| chat.id == id)
+                .context("test thread not found")?
+        } else {
+            &chats[0]
+        };
+        {
             let mut transcript = client
                 .subscribe_checked(methods::WATCH_DOC_MESSAGES, json!({"chatId":chat.id}))
                 .await?;
-            let update: zeron_doc::TranscriptUpdate = serde_json::from_value(
-                transcript.recv().await.context("transcript stream ended")?,
-            )?;
+            let value = transcript.recv().await.context("transcript stream ended")?;
+            let mut details: zeron_t3::ThreadDetails =
+                serde_json::from_value(value["t3Details"].clone())?;
+            let update: zeron_doc::TranscriptUpdate = serde_json::from_value(value)?;
             let mut entries = Vec::new();
             zeron_doc::apply_transcript_frame(&mut entries, update.frame)?;
             println!("Native transcript decoded: {} entries", entries.len());
+            let git = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while details.git.is_none() {
+                    let value = transcript.recv().await.context("transcript stream ended")?;
+                    if let Some(next) = value.get("t3Details") {
+                        details = serde_json::from_value(next.clone())?;
+                    }
+                    let update: zeron_doc::TranscriptUpdate = serde_json::from_value(value)?;
+                    zeron_doc::apply_transcript_frame(&mut entries, update.frame)?;
+                }
+                Ok::<_, anyhow::Error>(details.git.unwrap())
+            })
+            .await;
+            match git {
+                Ok(Ok(git)) => println!(
+                    "Git status decoded: {} +{} / -{}",
+                    git.branch.as_deref().unwrap_or("Detached"),
+                    git.additions,
+                    git.deletions
+                ),
+                Ok(Err(error)) => return Err(error),
+                Err(_) => println!("Git status not reported by this environment."),
+            }
         }
         println!(
             "T3 native adapter: {} projects, {} threads, {} sessions",

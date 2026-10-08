@@ -63,6 +63,15 @@ and `ORT_PREFER_DYNAMIC_LINK` when running through Cargo. When launching the
 binary directly on Linux, add that archive's `lib` directory to
 `LD_LIBRARY_PATH` so the dynamic loader can find `libonnxruntime.so`.
 
+The `Native T3 Linux` workflow builds and tests this client on a Linux runner.
+Its experimental artifact includes ONNX Runtime and a `native-t3` launcher:
+
+```sh
+ZERON_T3_CONNECTION=/absolute/path/to/connection.json /path/to/bundle/native-t3
+```
+
+The launcher requires a T3 connection and sets the bundled library path.
+
 This mode keeps native preferences in `~/.zeron-t3` (`Zeron T3` under Local App
 Data on Windows). It attaches to T3 without starting Zeron's execution engine,
 WorkOS sync, or automatic application updater. Closing the window leaves T3
@@ -78,8 +87,10 @@ client. T3 Connect pairing is not yet supported by the native client.
 The bridge lists projects and threads, projects live transcripts into native
 views, reconnects without replaying mutations, and supports creating a thread
 in an existing project, rename, archive/unarchive, seen state, plain-text send,
-steer, stop, questions, and approvals. The header shows model, branch, agent
-counts, and context usage when the provider reports it.
+steer, stop, questions, and approvals. The header shows model, branch, live
+Git additions/deletions, agent counts, and context usage when reported. Git
+counts use T3's branch comparison when available and the working tree otherwise;
+an unavailable status clears the counts.
 
 This is not yet a replacement for the complete T3 desktop client. Attachments,
 worktree preparation, native Git/file/terminal RPCs, schedules, interactive HTML
@@ -95,7 +106,8 @@ cargo run --locked -p zeron-t3 --example smoke -- /absolute/path/to/connection.j
 ```
 
 The smoke example only reads the paired environment and decodes native view
-types. Use an isolated environment when testing mutations or provider runs.
+types. Append a thread ID to read a particular conversation. Use an isolated
+environment when testing mutations or provider runs.
 
 For a disposable thread, the exercise example sends a short instruction twice
 with the same message identity, checks that only one response is produced,

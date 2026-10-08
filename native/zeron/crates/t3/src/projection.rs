@@ -273,6 +273,58 @@ pub struct ThreadDetails {
     pub active_agents: usize,
     pub total_agents: usize,
     pub context_tokens: Option<u64>,
+    pub git: Option<GitStats>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStats {
+    pub branch: Option<String>,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+impl GitStats {
+    pub fn apply(current: &mut Option<Self>, frame: Option<&Value>) -> Result<bool> {
+        let next = if let Some(frame) = frame {
+            match text(frame, "_tag")? {
+                "remoteUpdated" => return Ok(false),
+                "snapshot" | "localUpdated" => {}
+                _ => bail!("unknown T3 Git status event"),
+            }
+            let local = &frame["local"];
+            let is_repo = local["isRepo"]
+                .as_bool()
+                .context("invalid T3 repository status")?;
+            if is_repo {
+                let totals = if local["branchChanges"].is_object() {
+                    &local["branchChanges"]
+                } else {
+                    &local["workingTree"]
+                };
+                Some(Self {
+                    branch: if local["refName"].is_null() {
+                        None
+                    } else {
+                        Some(text(local, "refName")?.into())
+                    },
+                    additions: totals["insertions"]
+                        .as_u64()
+                        .context("invalid T3 Git additions")?,
+                    deletions: totals["deletions"]
+                        .as_u64()
+                        .context("invalid T3 Git deletions")?,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let changed = *current != next;
+        *current = next;
+        Ok(changed)
+    }
 }
 
 impl Projection {
@@ -320,6 +372,7 @@ impl Projection {
                 .count(),
             total_agents: agents.len(),
             context_tokens: self.context_usage().and_then(|usage| usage.tokens),
+            git: None,
         })
     }
     pub fn snapshot(frame: &Value) -> Result<Self> {
@@ -621,6 +674,36 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_counts_use_branch_changes_and_clear_when_unavailable() {
+        let mut current = None;
+        let mut frame = json!({"_tag":"snapshot","local":{"isRepo":true,"refName":"feature/native",
+            "workingTree":{"insertions":1,"deletions":2},"branchChanges":{"insertions":100,"deletions":50}}});
+        assert!(GitStats::apply(&mut current, Some(&frame)).unwrap());
+        assert_eq!(current.as_ref().unwrap().additions, 100);
+        assert!(
+            !GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"remoteUpdated","remote":null}))
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            current.as_ref().unwrap().branch.as_deref(),
+            Some("feature/native")
+        );
+        frame["_tag"] = json!("localUpdated");
+        frame["local"]["branchChanges"] = Value::Null;
+        GitStats::apply(&mut current, Some(&frame)).unwrap();
+        assert_eq!(current.as_ref().unwrap().deletions, 2);
+        frame["local"]["workingTree"]["insertions"] = json!(-1);
+        assert!(GitStats::apply(&mut current, Some(&frame)).is_err());
+        assert!(GitStats::apply(&mut current, None).unwrap());
+        assert!(current.is_none());
+        frame["local"]["isRepo"] = json!(false);
+        assert!(!GitStats::apply(&mut current, Some(&frame)).unwrap());
+    }
 
     #[test]
     fn context_meter_uses_only_the_active_provider_thread() {

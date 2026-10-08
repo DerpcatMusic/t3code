@@ -2,7 +2,7 @@
 
 mod projection;
 mod transport;
-pub use projection::ThreadDetails;
+pub use projection::{GitStats, ThreadDetails};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
@@ -646,22 +646,84 @@ impl RpcService for T3Service {
             methods::QUEUE_COMMAND => self.command(params).await.map(RpcReply::Value),
             methods::WATCH_DOC_MESSAGES => {
                 let id = text(&params, "chatId").map_err(failed)?;
-                let subscription = self
-                    .client()
-                    .await?
+                let client = self.client().await?;
+                let thread = self.thread(id).await?;
+                let workspace = thread["worktreePath"]
+                    .as_str()
+                    .map(String::from)
+                    .or_else(|| {
+                        self.shell
+                            .borrow()
+                            .projects
+                            .iter()
+                            .find(|project| project["id"] == thread["projectId"])
+                            .and_then(|project| project["workspaceRoot"].as_str().map(String::from))
+                    });
+                let subscription = client
                     .subscribe_checked(
                         "orchestration.subscribeThread",
                         json!({"threadId":id,"acceptBoundedSnapshot":false}),
                     )
                     .await?;
+                let thread_events = stream::unfold(subscription, |mut rx| async move {
+                    Some(((false, Some(rx.recv().await?)), rx))
+                })
+                .chain(stream::once(async { (false, None) }));
+                // An optional Git read must not hold up the opening transcript.
+                let git_events = stream::once(async move {
+                    let cwd = workspace?;
+                    client
+                        .subscribe_checked(
+                            "subscribeVcsStatus",
+                            json!({"cwd":cwd,"includeRemote":false}),
+                        )
+                        .await
+                        .ok()
+                })
+                .flat_map(|rx| {
+                    stream::unfold(rx, |mut rx| async move {
+                        Some(((true, Some(rx.as_mut()?.recv().await?)), rx))
+                    })
+                })
+                .chain(stream::once(async { (true, None) }));
+                let events = Box::pin(stream::select(thread_events, git_events));
+                let worktree = thread["worktreePath"].clone();
                 let stream = stream::unfold(
-                    (subscription, None::<Projection>, Vec::new(), environment),
-                    |(mut rx, mut projection, mut previous, environment)| async move {
+                    (
+                        events,
+                        None::<Projection>,
+                        Vec::new(),
+                        environment,
+                        None::<GitStats>,
+                        worktree,
+                    ),
+                    |(mut rx, mut projection, mut previous, environment, mut git, worktree)| async move {
                         loop {
-                            let frame = rx.recv().await?;
+                            let (git_event, frame) = rx.next().await?;
+                            if !git_event && frame.is_none() {
+                                return None;
+                            }
                             let result: Result<Option<Value>> = (|| {
-                                let snapshot = frame["kind"] == "snapshot";
-                                if snapshot {
+                                let empty = Value::Null;
+                                let frame = frame.as_ref().unwrap_or(&empty);
+                                let snapshot = !git_event && frame["kind"] == "snapshot";
+                                if git_event {
+                                    let changed = match GitStats::apply(
+                                        &mut git,
+                                        (!frame.is_null()).then_some(frame),
+                                    ) {
+                                        Ok(changed) => changed,
+                                        Err(_) => {
+                                            tracing::warn!(
+                                                "invalid T3 Git status; clearing native counts"
+                                            );
+                                            git.take().is_some()
+                                        }
+                                    };
+                                    if !changed {
+                                        return Ok(None);
+                                    }
+                                } else if snapshot {
                                     projection = Some(Projection::snapshot(&frame)?);
                                 } else if let Some(p) = &mut projection {
                                     if !p.apply(&frame)? {
@@ -670,9 +732,23 @@ impl RpcService for T3Service {
                                 } else {
                                     return Ok(None);
                                 }
-                                let projection = projection.as_ref().unwrap();
+                                let Some(projection) = projection.as_ref() else {
+                                    return Ok(None);
+                                };
+                                // Rebind Git to the new checkout after a T3 worktree handoff.
+                                ensure!(
+                                    projection.value["thread"]["worktreePath"] == worktree,
+                                    "T3 workspace changed; resubscribe"
+                                );
                                 let baseline = if snapshot {
                                     Some(projection.entries(&environment)?)
+                                } else if git_event {
+                                    TranscriptFrame::Delta {
+                                        upsert: vec![],
+                                        append: vec![],
+                                        remove: vec![],
+                                        count: previous.len(),
+                                    }
                                 } else {
                                     None
                                 };
@@ -694,15 +770,22 @@ impl RpcService for T3Service {
                                         .map(|next| TranscriptBaseline::capture(next)),
                                 };
                                 let mut value = serde_json::to_value(update)?;
-                                if snapshot || frame["event"]["type"] != "turn-item.updated" {
-                                    value["t3Details"] =
-                                        serde_json::to_value(projection.details()?)?;
+                                if git_event
+                                    || snapshot
+                                    || frame["event"]["type"] != "turn-item.updated"
+                                {
+                                    let mut details = projection.details()?;
+                                    details.git = git.clone();
+                                    value["t3Details"] = serde_json::to_value(details)?;
                                 }
                                 Ok(Some(value))
                             })();
                             match result {
                                 Ok(Some(value)) => {
-                                    return Some((value, (rx, projection, previous, environment)));
+                                    return Some((
+                                        value,
+                                        (rx, projection, previous, environment, git, worktree),
+                                    ));
                                 }
                                 Ok(None) => continue,
                                 Err(error) => {
