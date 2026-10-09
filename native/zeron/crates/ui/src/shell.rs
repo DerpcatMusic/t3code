@@ -5651,6 +5651,7 @@ impl Shell {
                 popover::menu_row(theme, false, format!("t3-chat-snooze-{chat_id}"))
                     .id("t3-chat-snooze")
                     .tab_index(if enabled { 0 } else { -1 })
+                    .tab_stop(enabled)
                     .role(gpui::Role::MenuItem)
                     .aria_label("Snooze thread")
                     .when(!enabled, |row| row.opacity(0.4).cursor_default())

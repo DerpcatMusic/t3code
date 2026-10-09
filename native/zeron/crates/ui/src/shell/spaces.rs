@@ -4363,6 +4363,7 @@ impl Shell {
     /// and local-device promotion. Jump shortcuts and session cycling read
     /// this projection so keyboard order never drifts from the screen.
     pub(super) fn sidebar_visible_order(&self, cx: &Context<Self>) -> Vec<String> {
+        let now = Utc::now();
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
         let saved_pins = self.active_sidebar_pins(cx);
@@ -4378,11 +4379,11 @@ impl Shell {
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
         let mut chats: Vec<zeron_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
+            .sidebar_chats(now, filter.as_deref())
             .into_iter()
             .map(|(_, chat)| chat.clone())
             .collect();
-        chats.sort_by(|left, right| self.sidebar_chat_order(state, left, right));
+        chats.sort_by(|left, right| self.sidebar_chat_order(state, left, right, now));
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
             .partition(|chat| pinned_order.contains(&chat.id));
@@ -4499,6 +4500,7 @@ impl Shell {
         state: &AppState,
         left: &zeron_proto::Chat,
         right: &zeron_proto::Chat,
+        now: chrono::DateTime<Utc>,
     ) -> std::cmp::Ordering {
         if self.settings.sidebar_organization == SidebarOrganization::ByStatus
             && self.settings.sidebar_sort == SidebarSort::LastUpdated
@@ -4508,7 +4510,7 @@ impl Shell {
             )
         {
             return left_state
-                .compare(right_state, Utc::now())
+                .compare(right_state, now)
                 .then_with(|| left.id.cmp(&right.id));
         }
         compare_sidebar_chats(self.settings.sidebar_sort, left, right)
@@ -4696,7 +4698,7 @@ impl Shell {
                 .into_iter()
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
-            chats.sort_by(|left, right| self.sidebar_chat_order(state, &left.1, &right.1));
+            chats.sort_by(|left, right| self.sidebar_chat_order(state, &left.1, &right.1, now));
             chats
                 .into_iter()
                 .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))

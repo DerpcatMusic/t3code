@@ -198,7 +198,10 @@ impl SidebarThread {
     pub fn can_snooze(&self, now: DateTime<Utc>) -> bool {
         if !self.capabilities.thread_snooze
             || self.needs_input()
-            || matches!(self.status.as_str(), "preparing" | "queued" | "starting")
+            || matches!(
+                self.activity_run_status.as_deref().unwrap_or(&self.status),
+                "preparing" | "queued" | "starting"
+            )
         {
             return false;
         }
@@ -399,7 +402,10 @@ pub fn sidebar_pins(threads: &HashMap<String, SidebarThread>, now: DateTime<Utc>
 // Same alphabet and midpoint as client-runtime/state/threadSort.ts; keys converge across clients.
 fn pin_key_between(a: Option<&str>, b: Option<&str>) -> Option<String> {
     fn valid(key: &str) -> bool {
-        !key.is_empty() && key.bytes().all(|c| c.is_ascii_lowercase()) && !key.ends_with('a')
+        !key.is_empty()
+            && key.len() <= 1024
+            && key.bytes().all(|c| c.is_ascii_lowercase())
+            && !key.ends_with('a')
     }
     fn midpoint(a: &[u8], b: &[u8]) -> Vec<u8> {
         if !b.is_empty() {
@@ -704,6 +710,8 @@ mod tests {
         assert!(!row.can_snooze(now + Duration::minutes(3)));
         row.pending_runtime_request = Some(json!({"kind":"auth_refresh"}));
         assert!(row.can_snooze(now + Duration::minutes(3)));
+        row.activity_run_status = Some("preparing".into());
+        assert!(!row.can_snooze(now + Duration::minutes(3)));
     }
 
     #[test]
@@ -713,6 +721,7 @@ mod tests {
         assert_eq!(pin_key_between(Some("n"), Some("o")).as_deref(), Some("nn"));
         assert_eq!(pin_key_between(None, Some("ab")).as_deref(), Some("aan"));
         assert!(pin_key_between(Some("a"), None).is_none());
+        assert!(pin_key_between(Some(&"z".repeat(1025)), None).is_none());
         assert!(pin_key_between(Some("z"), Some("n")).is_none());
         let mut left = "n".to_owned();
         for _ in 0..100 {
