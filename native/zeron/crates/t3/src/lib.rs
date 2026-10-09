@@ -564,7 +564,7 @@ impl RpcService for T3Service {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&json!({"ready":true})),
             methods::LOCAL_DEVICE => RpcReply::value(&json!({"deviceId":environment})),
-            methods::AUTH_STATUS => Ok(once(json!({"status":"signedOut"}))),
+            methods::AUTH_STATUS => Ok(once(json!({"state":"signedOut"}))),
             methods::WATCH_CONNECTIVITY => {
                 Ok(watch_values(self.connectivity.clone(), |v| Ok(v.clone())))
             }
