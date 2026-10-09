@@ -663,6 +663,7 @@ impl Shell {
                     .unwrap_or_default();
                 el.child(
                     div()
+                        .id("t3-thread-details")
                         .w(px(240.0))
                         .flex_none()
                         .flex()
