@@ -160,26 +160,33 @@ impl SidebarThread {
         })
     }
 
-    fn working(&self) -> bool {
-        if self.needs_input() || self.status == "failed" {
-            return false;
+    fn runtime_status(&self) -> Option<&str> {
+        let background = self.status != "failed"
+            && self.pending_background_tasks.iter().any(|task| {
+                matches!(
+                    task["kind"].as_str(),
+                    Some("subagent" | "monitor" | "background_task")
+                )
+            });
+        if self.latest_run_id.is_none() && self.active_provider_thread_id.is_none() && !background {
+            return None;
         }
-        let runtime = self.activity_run_status.as_deref().unwrap_or(&self.status);
-        let background = self.pending_background_tasks.iter().any(|task| {
-            matches!(
-                task["kind"].as_str(),
-                Some("subagent" | "monitor" | "background_task")
+        Some(if background {
+            "idle"
+        } else {
+            self.activity_run_status.as_deref().unwrap_or(&self.status)
+        })
+    }
+
+    fn working(&self) -> bool {
+        !self.needs_input()
+            && matches!(
+                self.runtime_status(),
+                Some("preparing" | "queued" | "starting" | "running" | "waiting" | "idle")
             )
-        });
-        let active = matches!(
-            runtime,
-            "preparing" | "queued" | "starting" | "running" | "waiting"
-        );
-        let runtime_exists =
-            self.latest_run_id.is_some() || self.active_provider_thread_id.is_some() || background;
-        (runtime_exists && (active || background || runtime == "idle"))
             && !(self.interaction_mode == "plan"
                 && self.has_actionable_proposed_plan
+                && self.latest_run_id.is_some()
                 && !matches!(
                     self.status.as_str(),
                     "preparing" | "queued" | "starting" | "running" | "waiting"
@@ -211,13 +218,13 @@ impl SidebarThread {
         if !self.capabilities.thread_snooze
             || self.needs_input()
             || matches!(
-                self.activity_run_status.as_deref().unwrap_or(&self.status),
-                "preparing" | "queued" | "starting"
+                self.runtime_status(),
+                Some("preparing" | "queued" | "starting")
             )
         {
             return false;
         }
-        let queued = self.status != "failed"
+        let queued = self.runtime_status() != Some("failed")
             && self.latest_user_message_at.is_some_and(|message| {
                 (now - message).num_milliseconds().abs() <= 120_000
                     && [
@@ -551,15 +558,19 @@ pub(crate) fn pin_change_commands(
                 .map(|(id, key)| (id.clone(), key)),
         );
     }
-    Ok(assignments
-        .into_iter()
-        .map(|(item, key)| {
-            json!({
-                "type":if item == id && pin_moved {"thread.pin"} else {"thread.pin.reorder"},
-                "threadId":item,"orderKey":key
-            })
-        })
-        .collect())
+    let mut commands = Vec::new();
+    for (item, key) in assignments {
+        let promote = item == id && pin_moved;
+        if promote {
+            commands.push(json!({"type":"thread.pin","threadId":item,"orderKey":key}));
+        }
+        // T3 preserves an existing pin's key when promoting it out of snooze.
+        if !promote || (thread.pinned_at.is_some() && thread.pin_order_key.as_deref() != Some(&key))
+        {
+            commands.push(json!({"type":"thread.pin.reorder","threadId":item,"orderKey":key}));
+        }
+    }
+    Ok(commands)
 }
 
 pub fn snooze_presets(now: DateTime<Local>) -> Vec<(&'static str, DateTime<Utc>)> {
@@ -735,8 +746,17 @@ mod tests {
         assert!(!row.can_snooze(now + Duration::minutes(3)));
         row.pending_runtime_request = Some(json!({"kind":"auth_refresh"}));
         assert!(row.can_snooze(now + Duration::minutes(3)));
+        row.pending_background_tasks.clear();
         row.activity_run_status = Some("preparing".into());
         assert!(!row.can_snooze(now + Duration::minutes(3)));
+        row.interaction_mode = "default".into();
+        row.status = "failed".into();
+        row.activity_run_status = Some("running".into());
+        assert_eq!(row.section(now), SidebarSection::Working);
+        assert!(!row.can_snooze(now));
+        row.activity_run_status = None;
+        assert_eq!(row.section(now), SidebarSection::Active);
+        assert!(row.can_snooze(now));
     }
 
     #[test]
@@ -829,9 +849,14 @@ mod tests {
                 after: None,
                 before: None,
             };
+            let mut expected = vec![json!({"type":"thread.pin","threadId":"moved","orderKey":"n"})];
+            if section == SidebarSection::Snoozed {
+                expected
+                    .push(json!({"type":"thread.pin.reorder","threadId":"moved","orderKey":"n"}));
+            }
             assert_eq!(
                 pin_change_commands(&threads, &change, now).unwrap(),
-                vec![json!({"type":"thread.pin","threadId":"moved","orderKey":"n"})]
+                expected
             );
         }
     }
