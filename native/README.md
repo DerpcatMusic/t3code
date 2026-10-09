@@ -18,7 +18,7 @@ automatic download is unavailable, extract an official Microsoft ONNX Runtime
 Linux archive and build with:
 
 ```sh
-ORT_LIB_LOCATION=/absolute/path/to/onnxruntime-linux-x64-1.30.0 \
+ORT_LIB_LOCATION=/absolute/path/to/onnxruntime-linux-x64-1.30.0/lib \
 ORT_PREFER_DYNAMIC_LINK=1 cargo build --locked -p zeron
 ```
 

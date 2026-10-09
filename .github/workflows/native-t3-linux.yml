@@ -45,17 +45,20 @@ jobs:
           printf '%s  %s\n' a5ed5a3cac51fbb2e90da632ae43d19212faaa20e76484e62bcb7c23ddb3b3fd "$RUNNER_TEMP/native-ort.tgz" | sha256sum --check -
           mkdir -p "$RUNNER_TEMP/native-ort"
           tar -xzf "$RUNNER_TEMP/native-ort.tgz" -C "$RUNNER_TEMP/native-ort"
-          printf 'ORT_LIB_LOCATION=%s\n' "$RUNNER_TEMP/native-ort/onnxruntime-linux-x64-1.30.0" >> "$GITHUB_ENV"
+          native_ort_root="$RUNNER_TEMP/native-ort/onnxruntime-linux-x64-1.30.0"
+          printf 'ORT_LIB_LOCATION=%s/lib\nNATIVE_ORT_ROOT=%s\n' "$native_ort_root" "$native_ort_root" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          prefix-key: native-t3-v1
           workspaces: native/zeron -> target
           cache-on-failure: true
+          cache-workspace-crates: true
       - name: Adapter tests
         run: cargo test --release --locked -p zeron-t3 --lib -j2
       - name: Native desktop
         run: cargo build --release --locked -p zeron --bin zeron -j2
       - name: Separate preference paths
-        run: cargo test --release --locked -p zeron --bin zeron paths::tests -j2
+        run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron --bin zeron paths::tests -j2
       - name: Integration clients
         run: cargo build --release --locked -p zeron-t3 --examples -j2
       - name: Package experimental client
@@ -66,11 +69,11 @@ jobs:
           cp target/release/examples/smoke target/release/examples/exercise "$native_bundle/"
           cp ../launch-t3 "$native_bundle/native-t3"
           chmod +x "$native_bundle/native-t3"
-          cp -a "$ORT_LIB_LOCATION/lib/." "$native_bundle/lib/"
+          cp -a "$ORT_LIB_LOCATION/." "$native_bundle/lib/"
           cp LICENSE "$native_bundle/LICENSE-Zeron"
           cp ../../LICENSE "$native_bundle/LICENSE-T3"
-          cp "$ORT_LIB_LOCATION/LICENSE" "$native_bundle/LICENSE-ONNX-Runtime"
-          cp "$ORT_LIB_LOCATION/ThirdPartyNotices.txt" "$native_bundle/ONNX-ThirdPartyNotices.txt"
+          cp "$NATIVE_ORT_ROOT/LICENSE" "$native_bundle/LICENSE-ONNX-Runtime"
+          cp "$NATIVE_ORT_ROOT/ThirdPartyNotices.txt" "$native_bundle/ONNX-ThirdPartyNotices.txt"
           cp ../README.md "$native_bundle/README.md"
           sh -n "$native_bundle/native-t3"
           if env -u ZERON_T3_CONNECTION "$native_bundle/native-t3" --version; then
