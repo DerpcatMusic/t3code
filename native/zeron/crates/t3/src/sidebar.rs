@@ -148,6 +148,18 @@ impl SidebarThread {
             && !self.raised_hand()
     }
 
+    pub fn snooze_label(&self, now: DateTime<Utc>) -> Option<String> {
+        if !self.is_snoozed(now) {
+            return None;
+        }
+        let label = zeron_proto::view::format_time_ago(now, self.snoozed_until?);
+        Some(if label == "now" {
+            "soon".into()
+        } else {
+            format!("in {label}")
+        })
+    }
+
     fn working(&self) -> bool {
         if self.needs_input() || self.status == "failed" {
             return false;
@@ -465,10 +477,10 @@ pub(crate) fn pin_change_commands(
         thread.capabilities.thread_pin_reorder,
         "This server does not support pin ordering"
     );
-    ensure!(
-        !thread.is_settled() && !thread.is_snoozed(now),
-        "Wake or un-settle this thread before pinning it"
-    );
+    let pin_moved = matches!(change, SidebarPinChange::Pin { .. })
+        || thread.pinned_at.is_none()
+        || thread.is_settled()
+        || thread.is_snoozed(now);
     let mut order = sidebar_pins(threads, now);
     for anchor in [after, before].into_iter().flatten() {
         ensure!(
@@ -533,14 +545,21 @@ pub(crate) fn pin_change_commands(
             order
                 .iter()
                 .zip(&mut keys)
-                .filter(|(id, key)| key_for(id) != Some(key.as_str()))
+                .filter(|(item, key)| {
+                    (item.as_str() == id && pin_moved) || key_for(item) != Some(key.as_str())
+                })
                 .map(|(id, key)| (id.clone(), key)),
         );
     }
-    Ok(assignments.into_iter().map(|(item, key)| json!({
-        "type":if item == id && thread.pinned_at.is_none() {"thread.pin"} else {"thread.pin.reorder"},
-        "threadId":item,"orderKey":key
-    })).collect())
+    Ok(assignments
+        .into_iter()
+        .map(|(item, key)| {
+            json!({
+                "type":if item == id && pin_moved {"thread.pin"} else {"thread.pin.reorder"},
+                "threadId":item,"orderKey":key
+            })
+        })
+        .collect())
 }
 
 pub fn snooze_presets(now: DateTime<Local>) -> Vec<(&'static str, DateTime<Utc>)> {
@@ -599,6 +618,12 @@ mod tests {
         row.latest_run_completed_at = Some(now - Duration::seconds(1));
         row.snoozed_until = Some(now + Duration::hours(1));
         assert_eq!(row.section(now), SidebarSection::Snoozed);
+        assert_eq!(row.snooze_label(now).as_deref(), Some("in 1h"));
+        assert_eq!(
+            row.snooze_label(now + Duration::seconds(3590)).as_deref(),
+            Some("soon")
+        );
+        assert_eq!(row.snooze_label(now + Duration::hours(1)), None);
         assert!(!row.visible_pin(now));
         assert!(row.visible_pin(now + Duration::hours(1)));
         row.pending_runtime_request = Some(json!({"kind":"approval"}));
@@ -783,5 +808,31 @@ mod tests {
             .capabilities
             .thread_pin_reorder = false;
         assert!(pin_change_commands(&threads, &change, now).is_err());
+    }
+
+    #[test]
+    fn pin_drops_wake_and_unsettle_through_the_atomic_t3_pin() {
+        let now = Utc::now();
+        for section in [SidebarSection::Snoozed, SidebarSection::Settled] {
+            let mut row = thread();
+            if section == SidebarSection::Snoozed {
+                row.pinned_at = Some(now);
+                row.snoozed_at = Some(now);
+                row.latest_run_completed_at = Some(now - Duration::seconds(1));
+                row.snoozed_until = Some(now + Duration::hours(1));
+            } else {
+                row.settled_override = Some("settled".into());
+            }
+            let threads = HashMap::from([("moved".into(), row)]);
+            let change = SidebarPinChange::Pin {
+                session_id: "moved".into(),
+                after: None,
+                before: None,
+            };
+            assert_eq!(
+                pin_change_commands(&threads, &change, now).unwrap(),
+                vec![json!({"type":"thread.pin","threadId":"moved","orderKey":"n"})]
+            );
+        }
     }
 }

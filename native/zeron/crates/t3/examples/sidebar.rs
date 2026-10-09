@@ -89,13 +89,19 @@ async fn main() -> Result<()> {
         change(&client, id, "setChatAutoSettle", json!({"enabled":false}), |meta| !meta["autoSettleDisabledAt"].is_null()).await?;
         change(&client, id, "setChatAutoSettle", json!({"enabled":true}), |meta| meta["autoSettleDisabledAt"].is_null()).await?;
         change(&client, &created[1], "pinChat", json!({}), |meta| !meta["pinnedAt"].is_null()).await?;
-        let reordered = change(&client, &created[1], "changeChatPin", json!({"change":SidebarPinChange::Move {
-            session_id:created[1].clone(),after:None,before:Some(id.clone())
+        let reordered = change(&client, id, "changeChatPin", json!({"change":SidebarPinChange::Move {
+            session_id:id.clone(),after:None,before:Some(created[1].clone())
         }}), |meta| meta["pinOrderKey"].is_string()).await?;
         let threads = reordered.as_array().unwrap().iter().map(|row| Ok((row["id"].as_str().unwrap().to_owned(), serde_json::from_value::<SidebarThread>(row["t3Sidebar"].clone())?)))
             .collect::<Result<std::collections::HashMap<_, _>>>()?;
         let pins = sidebar_pins(&threads, Utc::now());
-        ensure!(pins.iter().position(|item| item == &created[1]) < pins.iter().position(|item| item == id), "drag order did not persist");
+        ensure!(pins.iter().position(|item| item == id).context("first pin missing")? < pins.iter().position(|item| item == &created[1]).context("second pin missing")?, "drag order did not persist");
+        change(&client, &created[1], "snoozeChat", json!({"until":until}), |meta| !meta["snoozedUntil"].is_null()).await?;
+        let repinned = change(&client, &created[1], "changeChatPin", json!({"change":SidebarPinChange::Pin {
+            session_id:created[1].clone(),after:None,before:Some(id.clone())
+        }}), |meta| meta["snoozedUntil"].is_null() && !meta["pinnedAt"].is_null()).await?;
+        ensure!(row(&repinned, &created[1])["t3Sidebar"]["pinOrderKey"].as_str().context("second pin key missing")?
+            < row(&repinned, id)["t3Sidebar"]["pinOrderKey"].as_str().context("first pin key missing")?, "snoozed pin drop did not wake into the requested position");
         change(&client, id, "unpinChat", json!({}), |meta| meta["pinnedAt"].is_null()).await?;
         client.call(methods::FOCUS_CHAT, json!({"chatId":existing})).await?;
         let visited = observe(&client, |frame| !row(frame, &existing)["t3Sidebar"]["lastVisitedAt"].is_null()).await?;

@@ -4976,15 +4976,13 @@ impl Shell {
                     change_request,
                     group: _,
                 } = row;
-                let wake_at = self
+                let wake_label = self
                     .state
                     .read(cx)
                     .t3_sidebar
                     .get(&chat.id)
-                    .filter(|thread| thread.is_snoozed(now))
-                    .and_then(|thread| thread.snoozed_until);
-                let time_ago: SharedString = wake_at
-                    .map(|until| format!("in {}", format_time_ago(now, until)))
+                    .and_then(|thread| thread.snooze_label(now));
+                let time_ago: SharedString = wake_label
                     .unwrap_or_else(|| {
                         format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now)
                     })
