@@ -4932,8 +4932,19 @@ impl Shell {
                     change_request,
                     group: _,
                 } = row;
-                let time_ago: SharedString =
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
+                let wake_at = self
+                    .state
+                    .read(cx)
+                    .t3_sidebar
+                    .get(&chat.id)
+                    .filter(|thread| thread.is_snoozed(now))
+                    .and_then(|thread| thread.snoozed_until);
+                let time_ago: SharedString = wake_at
+                    .map(|until| format!("in {}", format_time_ago(now, until)))
+                    .unwrap_or_else(|| {
+                        format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now)
+                    })
+                    .into();
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = self
                     .settings
