@@ -5,6 +5,8 @@ on:
     paths:
       - 'native/zeron/**'
       - 'native/launch-t3'
+      - 'native/connect-local.py'
+      - 'native/test_connect_local.py'
       - '.github/workflows/native-t3-linux.yml'
   workflow_dispatch:
 
@@ -28,6 +30,8 @@ jobs:
       ORT_PREFER_DYNAMIC_LINK: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Local connection tests
+        run: python3 -m unittest discover -s .. -p test_connect_local.py -v
       - name: Linux desktop dependencies
         run: |
           sudo apt-get update -qq
@@ -68,6 +72,7 @@ jobs:
           cp target/release/zeron "$native_bundle/zeron"
           cp target/release/examples/smoke target/release/examples/exercise target/release/examples/sidebar "$native_bundle/"
           cp ../launch-t3 "$native_bundle/native-t3"
+          cp ../connect-local.py "$native_bundle/connect-local.py"
           chmod +x "$native_bundle/native-t3"
           cp -a "$ORT_LIB_LOCATION/." "$native_bundle/lib/"
           cp LICENSE "$native_bundle/LICENSE-Zeron"
@@ -76,8 +81,8 @@ jobs:
           cp "$NATIVE_ORT_ROOT/ThirdPartyNotices.txt" "$native_bundle/ONNX-ThirdPartyNotices.txt"
           cp ../README.md "$native_bundle/README.md"
           sh -n "$native_bundle/native-t3"
-          if env -u ZERON_T3_CONNECTION "$native_bundle/native-t3" --version; then
-            echo 'Native launcher must require a T3 connection' >&2
+          if env -u ZERON_T3_CONNECTION T3CODE_HOME="$RUNNER_TEMP/missing-native-t3-home" "$native_bundle/native-t3" --check; then
+            echo 'Native launcher must reject a missing local T3 server' >&2
             exit 1
           fi
           tar -czf "$RUNNER_TEMP/native-t3-linux-x64.tar.gz" -C "$RUNNER_TEMP" native-t3-linux-x64

@@ -1,7 +1,15 @@
 #!/bin/sh
 set -eu
 
-: "${ZERON_T3_CONNECTION:?Set ZERON_T3_CONNECTION to your T3 connection file}"
 native_bundle_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -z "${ZERON_T3_CONNECTION:-}" ]; then
+  ZERON_T3_CONNECTION=$(python3 "$native_bundle_dir/connect-local.py")
+  export ZERON_T3_CONNECTION
+fi
+if [ "${1:-}" = "--check" ]; then
+  test -f "$ZERON_T3_CONNECTION"
+  printf 'Native T3 connection ready. No app or agent started.\n'
+  exit 0
+fi
 export LD_LIBRARY_PATH="$native_bundle_dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$native_bundle_dir/zeron" "$@"

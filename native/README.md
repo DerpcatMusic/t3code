@@ -7,6 +7,15 @@ server.
 
 ## Run
 
+For the Linux bundle, keep T3 Code running and launch `native-t3`. It finds the
+existing local server and authenticates automatically through the installed
+T3 CLI. No connection file or second server is needed. Python 3 is required.
+The native client's scoped login and connection are private files under
+`~/.config/native-t3`. They are reused and renewed when needed at launch.
+
+The following manual setup is for source builds, isolated test environments,
+and remote servers.
+
 Build from `native/zeron`:
 
 ```sh
@@ -67,10 +76,12 @@ The `Native T3 Linux` workflow builds and tests this client on a Linux runner.
 Its experimental artifact includes ONNX Runtime and a `native-t3` launcher:
 
 ```sh
-ZERON_T3_CONNECTION=/absolute/path/to/connection.json /path/to/bundle/native-t3
+/path/to/bundle/native-t3
 ```
 
-The launcher requires a T3 connection and sets the bundled library path.
+The launcher discovers the running local T3 server and sets the bundled library
+path. For a remote server or an isolated environment, set `ZERON_T3_CONNECTION`
+to its connection file to bypass local discovery.
 
 This mode keeps native preferences in `~/.zeron-t3` (`Zeron T3` under Local App
 Data on Windows). It attaches to T3 without starting Zeron's execution engine,
@@ -79,8 +90,10 @@ and its background agents running.
 
 The adapter verifies server identity and protocol before sending credentials.
 Direct remote connections use HTTPS; an SSH forward can use loopback HTTP.
-Renew an expired bearer session in its existing token file and restart the
-client. T3 Connect pairing is not yet supported by the native client.
+Local logins renew automatically at launch; reopen the app if a continuous
+30-day session expires. For a manually configured remote connection, renew its
+bearer token file and restart the client. T3 Connect pairing is not yet supported
+by the native client.
 
 ## Current coverage
 
