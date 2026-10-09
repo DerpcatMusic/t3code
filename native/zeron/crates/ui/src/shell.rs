@@ -5635,6 +5635,7 @@ impl Shell {
                     .tab_index(0)
                     .role(gpui::Role::MenuItem)
                     .aria_label(label)
+                    .focus_visible(|row| row.bg(crate::theme::card_selected_bg()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.close_chat_menu(cx);
                         this.mutate(params.clone(), cx);
@@ -5654,6 +5655,7 @@ impl Shell {
                     .tab_stop(enabled)
                     .role(gpui::Role::MenuItem)
                     .aria_label("Snooze thread")
+                    .focus_visible(|row| row.bg(crate::theme::card_selected_bg()))
                     .when(!enabled, |row| row.opacity(0.4).cursor_default())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !enabled {
@@ -5696,6 +5698,7 @@ impl Shell {
                 .tab_index(0)
                 .role(gpui::Role::MenuItem)
                 .aria_label("Back to thread actions")
+                .focus_visible(|row| row.bg(crate::theme::card_selected_bg()))
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(menu) = this.chat_menu.open_mut() {
                         menu.page = ChatMenuPage::Root;
@@ -5726,6 +5729,7 @@ impl Shell {
                     .tab_index(0)
                     .role(gpui::Role::MenuItem)
                     .aria_label(label.clone())
+                    .focus_visible(|row| row.bg(crate::theme::card_selected_bg()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.close_chat_menu(cx);
                         this.mutate(params.clone(), cx);
@@ -10038,6 +10042,14 @@ impl Shell {
                                         format!("chat-menu-pin-{chat_id}"),
                                     )
                                     .id("chat-menu-pin")
+                                    .tab_index(0)
+                                    .role(gpui::Role::MenuItem)
+                                    .aria_label(if is_pinned {
+                                        "Unpin thread"
+                                    } else {
+                                        "Pin thread"
+                                    })
+                                    .focus_visible(|row| row.bg(crate::theme::card_selected_bg()))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.set_chat_pinned(pin_id.clone(), !is_pinned, cx)
                                     }))

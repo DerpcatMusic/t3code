@@ -2896,6 +2896,25 @@ impl Shell {
             self.cancel_sidebar_session_transfer(cx);
             return;
         }
+        let status_target = self
+            .sidebar_session_transfer
+            .as_ref()
+            .and_then(|drag| drag.preview.as_ref())
+            .and_then(|gap| match gap.group.as_str() {
+                "regular:status:0" => Some("active"),
+                "regular:status:3" => Some("settled"),
+                _ => None,
+            });
+        if self
+            .state
+            .read(cx)
+            .t3_sidebar
+            .contains_key(&payload.chat_id)
+            && let Some(section) = status_target
+        {
+            self.finish_t3_status_transfer(payload, section, cx);
+            return;
+        }
         if let SidebarSessionDrop::Section(id) = &target {
             if !self
                 .active_sidebar_sections(cx)
@@ -2997,6 +3016,31 @@ impl Shell {
         self.sidebar_prev_order.clear();
         self.sidebar_resort.clear();
         self.sidebar_new_keys.clear();
+        cx.notify();
+    }
+
+    fn finish_t3_status_transfer(
+        &mut self,
+        payload: &SidebarSessionDrag,
+        section: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.sidebar_session_transfer_is_valid(payload, cx)
+            || !self
+                .state
+                .read(cx)
+                .t3_sidebar
+                .contains_key(&payload.chat_id)
+        {
+            self.cancel_sidebar_session_transfer(cx);
+            return;
+        }
+        self.mutate(serde_json::json!({"op":"moveChatToSection","chatId":payload.chat_id,"section":section}), cx);
+        self.assign_sidebar_section(&payload.chat_id, None, cx);
+        self.sidebar_session_transfer = None;
+        self.cancel_pinned_session_drag(cx);
+        self.sidebar_prev_order.clear();
+        self.sidebar_resort.clear();
         cx.notify();
     }
 
@@ -5208,6 +5252,14 @@ impl Shell {
                     )
                     .into_any_element()
             });
+            let t3_status_drop = !self.state.read(cx).t3_sidebar.is_empty()
+                && (key == "status:0" || key == "status:3");
+            let section = if key == "status:3" {
+                "settled"
+            } else {
+                "active"
+            };
+            let header_drag_group = drag_group.clone();
             let header = sidebar_disclosure_header(
                 theme,
                 group_icon,
@@ -5230,7 +5282,35 @@ impl Shell {
                     this.sidebar_collapsed_groups.remove(&toggle_key);
                 }
                 cx.notify();
-            }));
+            }))
+            .when(t3_status_drop, |header| {
+                header
+                    .on_drag_move::<SidebarSessionDrag>(cx.listener(
+                        move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
+                            if !event.bounds.contains(&event.event.position) {
+                                return;
+                            }
+                            let top = f32::from(
+                                event.bounds.bottom() - this.sidebar_scroll.bounds().top(),
+                            ) - f32::from(this.sidebar_scroll.offset().y);
+                            if let Some(drag) = this.sidebar_session_transfer.as_mut() {
+                                drag.preview = Some(SidebarSessionGap {
+                                    group: header_drag_group.clone(),
+                                    index: 0,
+                                    pinned: false,
+                                    top,
+                                });
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    .on_drop(
+                        cx.listener(move |this, payload: &SidebarSessionDrag, _, cx| {
+                            cx.stop_propagation();
+                            this.finish_t3_status_transfer(payload, section, cx);
+                        }),
+                    )
+            });
             let body = self.render_sidebar_disclosure_body(
                 &motion_key,
                 !collapsed,
@@ -5247,22 +5327,13 @@ impl Shell {
                 .child(header)
                 .child(body)
                 .id(SharedString::from(format!("sidebar-drop-{key}")))
-                .when(key == "status:0" || key == "status:3", |element| {
-                    let section = if key == "status:3" { "settled" } else { "active" };
-                    element.on_drop(cx.listener(move |this, payload: &SidebarSessionDrag, _, cx| {
-                        cx.stop_propagation();
-                        if !this.sidebar_session_transfer_is_valid(payload, cx) || !this.state.read(cx).t3_sidebar.contains_key(&payload.chat_id) {
-                            this.cancel_sidebar_session_transfer(cx);
-                            return;
-                        }
-                        this.mutate(serde_json::json!({"op":"moveChatToSection","chatId":payload.chat_id,"section":section}), cx);
-                        this.assign_sidebar_section(&payload.chat_id, None, cx);
-                        this.sidebar_session_transfer = None;
-                        this.cancel_pinned_session_drag(cx);
-                        this.sidebar_prev_order.clear();
-                        this.sidebar_resort.clear();
-                        cx.notify();
-                    }))
+                .when(t3_status_drop, |element| {
+                    element.on_drop(cx.listener(
+                        move |this, payload: &SidebarSessionDrag, _, cx| {
+                            cx.stop_propagation();
+                            this.finish_t3_status_transfer(payload, section, cx);
+                        },
+                    ))
                 })
                 .into_any_element();
             rendered.push((format!("g:{collapse_key}"), height, element));
