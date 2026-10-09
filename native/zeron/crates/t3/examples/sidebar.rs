@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     let result: Result<()> = async {
         for title in ["Native sidebar check A", "Native sidebar check B"] {
             let id = uuid::Uuid::new_v4().to_string();
-            client.call(methods::MUTATE, json!({"op":"createChat","chatId":id,"spaceId":chat.space_id,"title":title})).await?;
+            client.call(methods::MUTATE, json!({"op":"createChat","chatId":id,"spaceId":chat.space_id,"title":title,"config":chat.config})).await?;
             created.push(id);
         }
         observe(&client, |frame| created.iter().all(|id| frame.as_array().unwrap().iter().any(|row| row["id"] == *id))).await?;
