@@ -83,6 +83,7 @@ pub fn upsert(values: &mut Vec<Value>, item: Value) -> Result<()> {
 
 #[derive(Clone, Default)]
 pub struct Shell {
+    pub capabilities: crate::SidebarCapabilities,
     pub projects: Vec<Value>,
     pub threads: Vec<Value>,
     pub archived_threads: Vec<Value>,
@@ -221,7 +222,7 @@ impl Shell {
                     "lastMessagePreview":t["latestVisibleMessage"]["text"],
                 "lastMessageAt":t["latestVisibleMessage"]["updatedAt"],
                     "lastSeenAt":t["lastVisitedAt"], "createdAt":t["createdAt"],
-                    "parentChatId":t["lineage"]["parentThreadId"],
+                    "parentChatId":if t["lineage"]["relationshipToParent"] == "subagent" { t["lineage"]["parentThreadId"].clone() } else { Value::Null },
                 }))?)
             })
             .collect()
@@ -674,6 +675,20 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forks_stay_in_the_sidebar_but_delegated_children_do_not() {
+        let shell = Shell {
+            threads: ["fork", "subagent"].into_iter().map(|kind| json!({
+                "id":kind,"projectId":"project","title":"Child","createdAt":"2026-10-09T00:00:00Z",
+                "lineage":{"parentThreadId":"parent","relationshipToParent":kind}
+            })).collect(),
+            ..Default::default()
+        };
+        let chats = shell.chats("environment", &[]).unwrap();
+        assert_eq!(chats[0].parent_chat_id, None);
+        assert_eq!(chats[1].parent_chat_id.as_deref(), Some("parent"));
+    }
 
     #[test]
     fn git_counts_use_branch_changes_and_clear_when_unavailable() {

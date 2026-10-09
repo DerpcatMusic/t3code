@@ -66,7 +66,7 @@ jobs:
           native_bundle="$RUNNER_TEMP/native-t3-linux-x64"
           mkdir -p "$native_bundle/lib"
           cp target/release/zeron "$native_bundle/zeron"
-          cp target/release/examples/smoke target/release/examples/exercise "$native_bundle/"
+          cp target/release/examples/smoke target/release/examples/exercise target/release/examples/sidebar "$native_bundle/"
           cp ../launch-t3 "$native_bundle/native-t3"
           chmod +x "$native_bundle/native-t3"
           cp -a "$ORT_LIB_LOCATION/." "$native_bundle/lib/"

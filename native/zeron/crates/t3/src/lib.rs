@@ -1,8 +1,13 @@
 //! T3 owns providers, workspaces and durable history. This crate only adapts views.
 
 mod projection;
+mod sidebar;
 mod transport;
+
 pub use projection::{GitStats, ThreadDetails};
+pub use sidebar::{
+    SidebarCapabilities, SidebarSection, SidebarThread, sidebar_pins, snooze_presets,
+};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
@@ -55,6 +60,7 @@ impl T3Service {
             .await?
             .context("T3 shell stream ended before its snapshot")?;
         let mut shell = Shell::default();
+        shell.capabilities = SidebarCapabilities::from_config(&server)?;
         shell.apply(&first)?;
         let mut archives = tokio::time::timeout(
             Duration::from_secs(15),
@@ -114,12 +120,18 @@ impl T3Service {
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                     let connect = tokio::time::timeout(Duration::from_secs(45), async {
                         let next = task_config.connect().await?;
+                        let server = next.client.call("server.getConfig", json!({})).await?;
+                        ensure!(
+                            server["environment"]["environmentId"] == task_config.environment_id,
+                            "T3 config identity mismatch"
+                        );
                         let mut rx = next
                             .client
                             .subscribe_checked("orchestration.subscribeShell", json!({}))
                             .await?;
                         let first = rx.recv().await.context("T3 shell stream ended")?;
                         let mut shell = Shell::default();
+                        shell.capabilities = SidebarCapabilities::from_config(&server)?;
                         shell.apply(&first)?;
                         let mut archives = next
                             .client
@@ -210,6 +222,50 @@ impl T3Service {
     async fn mutate(&self, params: Value) -> Result<Value, RpcError> {
         let op = text(&params, "op").map_err(failed)?;
         let id = text(&params, "chatId").map_err(failed)?;
+        if op == "moveChatToSection" {
+            let commands = {
+                let shell = self.shell.borrow();
+                let thread = shell
+                    .all_threads()
+                    .find(|thread| thread["id"] == id)
+                    .ok_or_else(|| RpcError::BadParams("T3 thread no longer exists".into()))?;
+                SidebarThread::from_shell(thread, &shell.capabilities)
+                    .map_err(failed)?
+                    .section_commands(&params, chrono::Utc::now())
+                    .map_err(failed)?
+            };
+            for command in commands {
+                self.dispatch(command).await?;
+            }
+            return Ok(json!({"ok":true}));
+        }
+        if op == "changeChatPin" {
+            let change: zeron_proto::SidebarPinChange =
+                serde_json::from_value(params["change"].clone()).map_err(failed)?;
+            if change.session_id() != id {
+                return Err(RpcError::BadParams("pin change thread mismatch".into()));
+            }
+            let commands = {
+                let shell = self.shell.borrow();
+                let threads = shell
+                    .all_threads()
+                    .filter(|thread| thread["deletedAt"].is_null())
+                    .map(|thread| {
+                        Ok((
+                            text(thread, "id")?.to_owned(),
+                            SidebarThread::from_shell(thread, &shell.capabilities)?,
+                        ))
+                    })
+                    .collect::<Result<std::collections::HashMap<_, _>>>()
+                    .map_err(failed)?;
+                sidebar::pin_change_commands(&threads, &change, chrono::Utc::now())
+                    .map_err(failed)?
+            };
+            for command in commands {
+                self.dispatch(command).await?;
+            }
+            return Ok(json!({"ok":true}));
+        }
         let command = match op {
             "renameChat" => {
                 json!({"type":"thread.metadata.update","threadId":id,"title":text(&params,"title").map_err(failed)?})
@@ -221,6 +277,26 @@ impl T3Service {
                 json!({"type":if archived {"thread.archive"} else {"thread.unarchive"},"threadId":id})
             }
             "markChatSeen" => self.visit(id).await?,
+            "deleteChat" => json!({"type":"thread.delete","threadId":id}),
+            "settleChat"
+            | "unsettleChat"
+            | "snoozeChat"
+            | "wakeChat"
+            | "pinChat"
+            | "unpinChat"
+            | "setChatAutoSettle"
+            | "markChatUnread"
+            | "regenerateChatTitle" => {
+                let shell = self.shell.borrow();
+                let thread = shell
+                    .all_threads()
+                    .find(|thread| thread["id"] == id)
+                    .ok_or_else(|| RpcError::BadParams("T3 thread no longer exists".into()))?;
+                SidebarThread::from_shell(thread, &shell.capabilities)
+                    .map_err(failed)?
+                    .command(&params, chrono::Utc::now())
+                    .map_err(failed)?
+            }
             "createChat" => {
                 let project_id = text(&params, "spaceId").map_err(failed)?;
                 let shell = self.shell.borrow().clone();
@@ -269,7 +345,7 @@ impl T3Service {
                     "modelSelection":selection,"runtimeMode":"approval-required","interactionMode":"default",
                     "branch":params["branch"],"worktreePath":null,"createdBy":"user","creationSource":"web"})
             }
-            // Keep destructive deletion and Zeron sync operations off this bridge.
+            // Zeron account and sync mutations are not T3 operations.
             _ => return Err(RpcError::UnknownMethod(format!("T3 native mutation {op}"))),
         };
         self.dispatch(command).await?;
@@ -581,7 +657,28 @@ impl RpcService for T3Service {
             methods::WATCH_CHATS => {
                 let providers = self.providers().await?;
                 Ok(watch_values(self.shell.clone(), move |s| {
-                    Ok(serde_json::to_value(s.chats(&environment, &providers)?)?)
+                    let metadata: std::collections::HashMap<_, _> = s
+                        .all_threads()
+                        .map(|thread| {
+                            Ok((
+                                text(thread, "id")?,
+                                SidebarThread::from_shell(thread, &s.capabilities)?,
+                            ))
+                        })
+                        .collect::<anyhow::Result<_>>()?;
+                    let chats = s
+                        .chats(&environment, &providers)?
+                        .into_iter()
+                        .map(|chat| {
+                            let sidebar = metadata
+                                .get(chat.id.as_str())
+                                .context("missing T3 sidebar thread")?;
+                            let mut value = serde_json::to_value(chat)?;
+                            value["t3Sidebar"] = serde_json::to_value(sidebar)?;
+                            Ok(value)
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    Ok(json!(chats))
                 }))
             }
             methods::WATCH_DEVICES => {

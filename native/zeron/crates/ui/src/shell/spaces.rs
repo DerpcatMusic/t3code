@@ -1317,7 +1317,10 @@ mod pinned_session_tests {
             // The globe/archive slot is always reserved, so hovering swaps its
             // glyph in place: the title keeps its width and the status and time
             // columns never move.
-            assert_eq!(cx.debug_bounds("chat-title-older").unwrap().size.width, title.size.width);
+            assert_eq!(
+                cx.debug_bounds("chat-title-older").unwrap().size.width,
+                title.size.width
+            );
             assert_eq!(cx.debug_bounds("chat-status-older").unwrap(), status);
             assert_eq!(cx.debug_bounds("chat-time-older").unwrap(), time);
         }
@@ -2101,6 +2104,7 @@ impl Render for SidebarViewOptionsTooltip {
 
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
+    ByStatus,
     ByProject,
     Compact,
     ShowProjectIcon,
@@ -2120,15 +2124,21 @@ impl SidebarViewRow {
     fn closes_submenu(self) -> bool {
         matches!(
             self,
-            Self::ByProject | Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
+            Self::ByStatus
+                | Self::ByProject
+                | Self::ByDevice
+                | Self::InOneList
+                | Self::LastUpdated
+                | Self::Created
         )
     }
 }
 
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..10)];
+    [("Organize", 0..4), ("Sort", 4..6), ("Show", 6..11)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 10] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 11] = [
+    SidebarViewRow::ByStatus,
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
@@ -3230,7 +3240,12 @@ impl Shell {
         let projects = state.projects();
         let names: Vec<String> = projects
             .iter()
-            .map(|members| state.representative_space(members[0]).display_name().to_string())
+            .map(|members| {
+                state
+                    .representative_space(members[0])
+                    .display_name()
+                    .to_string()
+            })
             .collect();
         let mut rows: Vec<SpacesMenuRow> = Vec::new();
         if query.trim().is_empty() {
@@ -3401,6 +3416,9 @@ impl Shell {
         self.cancel_sidebar_session_transfer(cx);
         self.cancel_pinned_session_drag(cx);
         match row {
+            SidebarViewRow::ByStatus => {
+                self.settings.sidebar_organization = SidebarOrganization::ByStatus
+            }
             SidebarViewRow::ByProject => {
                 self.settings.sidebar_organization = SidebarOrganization::ByProject
             }
@@ -3593,6 +3611,7 @@ impl Shell {
         let show_pr = self.settings.sidebar_show_pull_request;
 
         let labels = [
+            "By status",
             "By device",
             "By project",
             "None",
@@ -3605,6 +3624,7 @@ impl Shell {
             "Location",
         ];
         let icons = [
+            icons::CHECKLIST,
             icons::LAPTOP,
             icons::FOLDER,
             icons::LIST,
@@ -3617,6 +3637,7 @@ impl Shell {
             icons::FOLDER,
         ];
         let selected = [
+            organization == SidebarOrganization::ByStatus,
             organization == SidebarOrganization::ByDevice,
             organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::InOneList,
@@ -3629,8 +3650,8 @@ impl Shell {
             self.settings.sidebar_show_project_label,
         ];
         let values = [
-            labels[selected[..3].iter().position(|v| *v).unwrap_or(0)].to_string(),
-            labels[3 + selected[3..5].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[selected[..4].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[4 + selected[4..6].iter().position(|v| *v).unwrap_or(0)].to_string(),
         ];
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
@@ -4361,7 +4382,7 @@ impl Shell {
             .into_iter()
             .map(|(_, chat)| chat.clone())
             .collect();
-        chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        chats.sort_by(|left, right| self.sidebar_chat_order(state, left, right));
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
             .partition(|chat| pinned_order.contains(&chat.id));
@@ -4372,7 +4393,10 @@ impl Shell {
                 custom_order.extend(
                     chats
                         .iter()
-                        .filter(|chat| section.session_ids.contains(&chat.id))
+                        .filter(|chat| {
+                            self.sidebar_custom_section_eligible(state, &chat.id)
+                                && section.session_ids.contains(&chat.id)
+                        })
                         .map(|chat| chat.id.clone()),
                 );
             }
@@ -4380,20 +4404,17 @@ impl Shell {
         let chats: Vec<_> = chats
             .into_iter()
             .filter(|chat| {
-                !custom_sections
-                    .iter()
-                    .any(|section| section.session_ids.contains(&chat.id))
+                !self.sidebar_custom_section_eligible(state, &chat.id)
+                    || !custom_sections
+                        .iter()
+                        .any(|section| section.session_ids.contains(&chat.id))
             })
             .collect();
         let ordered = if self.settings.sidebar_organization != SidebarOrganization::InOneList {
             let mut groups: Vec<(Option<(String, String)>, Vec<zeron_proto::Chat>)> = Vec::new();
             for chat in chats {
                 let key = Some((
-                    if self.settings.sidebar_organization == SidebarOrganization::ByProject {
-                        sidebar_project_group(state, &chat).0
-                    } else {
-                        chat.device_id.clone()
-                    },
+                    self.sidebar_group_key(state, &chat).unwrap_or_default(),
                     String::new(),
                 ));
                 if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &key) {
@@ -4404,6 +4425,15 @@ impl Shell {
             }
             if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
                 promote_local_device_group(&mut groups, state.local_device_id.as_deref());
+            }
+            if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
+                groups.sort_by(|left, right| left.0.cmp(&right.0));
+                groups.retain(|(group, _)| {
+                    !group.as_ref().is_some_and(|(key, _)| {
+                        self.sidebar_collapsed_groups
+                            .contains(&self.sidebar_group_collapse_key(key))
+                    })
+                });
             }
             groups
                 .into_iter()
@@ -4436,15 +4466,58 @@ impl Shell {
     /// by project; `None` in one list.
     fn sidebar_group_key(&self, state: &AppState, chat: &zeron_proto::Chat) -> Option<String> {
         match self.settings.sidebar_organization {
+            SidebarOrganization::ByStatus => Some(self.sidebar_status_group(state, chat).0),
             SidebarOrganization::ByDevice => Some(chat.device_id.clone()),
             SidebarOrganization::ByProject => Some(sidebar_project_group(state, chat).0),
             SidebarOrganization::InOneList => None,
         }
     }
 
+    fn sidebar_status_group(&self, state: &AppState, chat: &zeron_proto::Chat) -> (String, String) {
+        if let Some(thread) = state.t3_sidebar.get(&chat.id) {
+            return thread.section(Utc::now()).group();
+        }
+        if state.display_status_for(chat, Utc::now()) == ChatIndicator::Working {
+            zeron_t3::SidebarSection::Working.group()
+        } else {
+            zeron_t3::SidebarSection::Active.group()
+        }
+    }
+
+    fn sidebar_custom_section_eligible(&self, state: &AppState, id: &str) -> bool {
+        self.settings.sidebar_organization != SidebarOrganization::ByStatus
+            || state.t3_sidebar.get(id).is_none_or(|thread| {
+                matches!(
+                    thread.section(Utc::now()),
+                    zeron_t3::SidebarSection::Active | zeron_t3::SidebarSection::Working
+                )
+            })
+    }
+
+    fn sidebar_chat_order(
+        &self,
+        state: &AppState,
+        left: &zeron_proto::Chat,
+        right: &zeron_proto::Chat,
+    ) -> std::cmp::Ordering {
+        if self.settings.sidebar_organization == SidebarOrganization::ByStatus
+            && self.settings.sidebar_sort == SidebarSort::LastUpdated
+            && let (Some(left_state), Some(right_state)) = (
+                state.t3_sidebar.get(&left.id),
+                state.t3_sidebar.get(&right.id),
+            )
+        {
+            return left_state
+                .compare(right_state, Utc::now())
+                .then_with(|| left.id.cmp(&right.id));
+        }
+        compare_sidebar_chats(self.settings.sidebar_sort, left, right)
+    }
+
     /// A device/project group's key in `sidebar_collapsed_groups`.
     fn sidebar_group_collapse_key(&self, group: &str) -> String {
         let organization = match self.settings.sidebar_organization {
+            SidebarOrganization::ByStatus => "status",
             SidebarOrganization::ByDevice => "device",
             SidebarOrganization::ByProject => "project",
             SidebarOrganization::InOneList => "list",
@@ -4585,6 +4658,7 @@ impl Shell {
             .cloned()
             .filter(|_| self.settings.sidebar_show_pull_request);
         let group = match self.settings.sidebar_organization {
+            SidebarOrganization::ByStatus => Some(self.sidebar_status_group(state, &chat)),
             SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
             SidebarOrganization::ByProject => Some(sidebar_project_group(state, &chat)),
             SidebarOrganization::InOneList => None,
@@ -4622,9 +4696,7 @@ impl Shell {
                 .into_iter()
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
-            chats.sort_by(|left, right| {
-                compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
-            });
+            chats.sort_by(|left, right| self.sidebar_chat_order(state, &left.1, &right.1));
             chats
                 .into_iter()
                 .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
@@ -4684,9 +4756,10 @@ impl Shell {
             .collect();
         let mut regular_groups: Vec<(Option<(String, String)>, Vec<ActiveChatRow>)> = Vec::new();
         for row in regular_rows {
-            if let Some(index) = custom_sections
-                .iter()
-                .position(|section| section.session_ids.contains(&row.chat.id))
+            if self.sidebar_custom_section_eligible(self.state.read(cx), &row.chat.id)
+                && let Some(index) = custom_sections
+                    .iter()
+                    .position(|section| section.session_ids.contains(&row.chat.id))
             {
                 custom_groups[index].1.push(row);
                 continue;
@@ -4705,6 +4778,9 @@ impl Shell {
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
         }
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
+        if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
+            regular_groups.sort_by(|left, right| left.0.cmp(&right.0));
+        }
         if !pinned_rows.is_empty() {
             sections.push((None, pinned_rows));
         }
@@ -5056,7 +5132,9 @@ impl Shell {
                             .mb(px((extra_gap - SIDEBAR_LIST_GAP).min(0.0))),
                     )
                 });
-            let visible_label: SharedString = if collapsed {
+            let visible_label: SharedString = if collapsed
+                || self.settings.sidebar_organization == SidebarOrganization::ByStatus
+            {
                 format!("{label} ({row_count})").into()
             } else {
                 label.into()
@@ -5081,7 +5159,9 @@ impl Shell {
                         .spaces
                         .iter()
                         .find(|space| zeron_proto::view::project_key(space) == key)
-                        .and_then(|space| state.project_members(space).first().map(|m| m.id.clone()))
+                        .and_then(|space| {
+                            state.project_members(space).first().map(|m| m.id.clone())
+                        })
                 })
                 .flatten();
             let new_chat_button = group_space.map(|project| {
@@ -5115,24 +5195,29 @@ impl Shell {
                     )
                     .into_any_element()
             });
-            let header =
-                sidebar_disclosure_header(theme, group_icon, visible_label, new_chat_button, chevron)
-                    .group(group_name)
-                .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
-                    this.begin_sidebar_disclosure_motion(
-                        &toggle_motion_key,
-                        if was_open { body_height } else { 0.0 },
-                        if was_open { 0.0 } else { body_height },
-                    );
-                    if was_open {
-                        this.sidebar_collapsed_groups.insert(toggle_key.clone());
-                    } else {
-                        this.sidebar_collapsed_groups.remove(&toggle_key);
-                    }
-                    cx.notify();
-                }));
+            let header = sidebar_disclosure_header(
+                theme,
+                group_icon,
+                visible_label,
+                new_chat_button,
+                chevron,
+            )
+            .group(group_name)
+            .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
+                this.begin_sidebar_disclosure_motion(
+                    &toggle_motion_key,
+                    if was_open { body_height } else { 0.0 },
+                    if was_open { 0.0 } else { body_height },
+                );
+                if was_open {
+                    this.sidebar_collapsed_groups.insert(toggle_key.clone());
+                } else {
+                    this.sidebar_collapsed_groups.remove(&toggle_key);
+                }
+                cx.notify();
+            }));
             let body = self.render_sidebar_disclosure_body(
                 &motion_key,
                 !collapsed,
@@ -5148,6 +5233,24 @@ impl Shell {
                 .pt(px(SIDEBAR_SECTION_GAP))
                 .child(header)
                 .child(body)
+                .id(SharedString::from(format!("sidebar-drop-{key}")))
+                .when(key == "status:0" || key == "status:3", |element| {
+                    let section = if key == "status:3" { "settled" } else { "active" };
+                    element.on_drop(cx.listener(move |this, payload: &SidebarSessionDrag, _, cx| {
+                        cx.stop_propagation();
+                        if !this.sidebar_session_transfer_is_valid(payload, cx) || !this.state.read(cx).t3_sidebar.contains_key(&payload.chat_id) {
+                            this.cancel_sidebar_session_transfer(cx);
+                            return;
+                        }
+                        this.mutate(serde_json::json!({"op":"moveChatToSection","chatId":payload.chat_id,"section":section}), cx);
+                        this.assign_sidebar_section(&payload.chat_id, None, cx);
+                        this.sidebar_session_transfer = None;
+                        this.cancel_pinned_session_drag(cx);
+                        this.sidebar_prev_order.clear();
+                        this.sidebar_resort.clear();
+                        cx.notify();
+                    }))
+                })
                 .into_any_element();
             rendered.push((format!("g:{collapse_key}"), height, element));
         }

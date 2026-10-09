@@ -282,7 +282,9 @@ impl EngineBackend for T3Engine {
         &self.client
     }
     fn mode(&self) -> EngineMode {
-        EngineMode::Remote { url: self.service.origin.clone() }
+        EngineMode::Remote {
+            url: self.service.origin.clone(),
+        }
     }
     // Closing a native viewport must never stop the T3 environment or its agents.
     async fn shutdown(&self) {}
@@ -740,6 +742,8 @@ pub struct AppState {
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
     pub t3_details: HashMap<String, zeron_t3::ThreadDetails>,
+    pub t3_sidebar: HashMap<String, zeron_t3::SidebarThread>,
+    t3_snooze_task: Option<Task<()>>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     /// Fork RPC may arrive ahead of its registry row on a remote device.
@@ -878,6 +882,8 @@ impl AppState {
             connectivity_observed: false,
             spaces: Vec::new(),
             t3_details: HashMap::new(),
+            t3_sidebar: HashMap::new(),
+            t3_snooze_task: None,
             chats: Vec::new(),
             pending_side_chat: None,
             unsaved_side_chat: false,
@@ -1104,7 +1110,8 @@ impl AppState {
         }
         sort_chats(&mut chats);
         self.chats = chats;
-        self.t3_details.retain(|id, _| self.chats.iter().any(|chat| &chat.id == id));
+        self.t3_details
+            .retain(|id, _| self.chats.iter().any(|chat| &chat.id == id));
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         self.chats_synced = true;
         self.transcript_cache
@@ -2028,7 +2035,30 @@ impl AppState {
         if self.send_pending(&chat.id, now) {
             return ChatIndicator::Working;
         }
+        if let Some(thread) = self.t3_sidebar.get(&chat.id) {
+            return thread.indicator();
+        }
         display_status(chat, self.session_for(&chat.id), now)
+    }
+
+    fn schedule_t3_snooze_wake(&mut self, cx: &mut Context<Self>) {
+        let now = Utc::now();
+        let delay = self
+            .t3_sidebar
+            .values()
+            .filter(|thread| thread.is_snoozed(now))
+            .filter_map(|thread| thread.snoozed_until)
+            .min()
+            .and_then(|until| (until - now).to_std().ok());
+        self.t3_snooze_task = delay.map(|delay| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = this.update(cx, |state, cx| {
+                    state.schedule_t3_snooze_wake(cx);
+                    cx.notify();
+                });
+            })
+        });
     }
 
     /// The sidebar's Sessions list: every non-archived chat of a LIVE space,
@@ -2202,6 +2232,9 @@ impl AppState {
         self.session_presence_presentation.clear();
         self.spaces.clear();
         self.chats.clear();
+        self.t3_sidebar.clear();
+        self.t3_details.clear();
+        self.t3_snooze_task = None;
         self.pending_side_chat = None;
         self.unsaved_side_chat = false;
         self.sessions.clear();
@@ -2826,6 +2859,15 @@ fn spawn_deferred_engine_watch(
 /// Chats watch. Boot selection is the shell's job (it lands on the first
 /// restored open tab, device-local state this entity can't see); this task
 /// only pumps frames.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SidebarChatFrame {
+    #[serde(flatten)]
+    chat: Chat,
+    #[serde(default)]
+    t3_sidebar: Option<zeron_t3::SidebarThread>,
+}
+
 fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
     cx.spawn(async move |this, cx| {
         // Resubscribe loop (same contract as the transcript watch): a daemon
@@ -2850,7 +2892,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 }
             };
             while let Some(value) = rx.recv().await {
-                let parsed: Vec<Chat> = match serde_json::from_value(value) {
+                let parsed: Vec<SidebarChatFrame> = match serde_json::from_value(value) {
                     Ok(parsed) => parsed,
                     Err(err) => {
                         tracing::warn!(error = %err, "dropping malformed chats frame");
@@ -2858,7 +2900,18 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                     }
                 };
                 let alive = this.update(cx, |state, cx| {
-                    state.apply_chats(parsed);
+                    state.t3_sidebar.clear();
+                    let chats = parsed
+                        .into_iter()
+                        .map(|frame| {
+                            if let Some(sidebar) = frame.t3_sidebar {
+                                state.t3_sidebar.insert(frame.chat.id.clone(), sidebar);
+                            }
+                            frame.chat
+                        })
+                        .collect();
+                    state.apply_chats(chats);
+                    state.schedule_t3_snooze_wake(cx);
                     state.apply_pending_deep_link(cx);
                     state.reconcile_change_request_watches(cx);
                     cx.notify();
@@ -3100,8 +3153,9 @@ fn spawn_transcript_watch(
                     .get("historyPending")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let t3_details = value.get("t3Details").cloned()
-                    .and_then(|details| serde_json::from_value::<zeron_t3::ThreadDetails>(details).ok());
+                let t3_details = value.get("t3Details").cloned().and_then(|details| {
+                    serde_json::from_value::<zeron_t3::ThreadDetails>(details).ok()
+                });
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {

@@ -662,6 +662,7 @@ fn flush_latest(cx: &mut App) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SidebarOrganization {
+    ByStatus,
     ByProject,
     ByDevice,
     #[default]
@@ -986,7 +987,11 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
-            sidebar_organization: SidebarOrganization::InOneList,
+            sidebar_organization: if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+                SidebarOrganization::ByStatus
+            } else {
+                SidebarOrganization::InOneList
+            },
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_show_project_label: true,
             sidebar_compact: true,

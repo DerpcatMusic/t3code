@@ -186,6 +186,7 @@ fn move_settings_focus(
 enum ChatMenuPage {
     Root,
     Copy,
+    Snooze,
 }
 
 #[derive(Clone, Copy)]
@@ -5398,6 +5399,10 @@ impl Shell {
     }
 
     fn active_sidebar_pins(&self, cx: &App) -> Vec<String> {
+        let state = self.state.read(cx);
+        if !state.t3_sidebar.is_empty() {
+            return zeron_t3::sidebar_pins(&state.t3_sidebar, Utc::now());
+        }
         let mut pins = self.raw_sidebar_pins(cx);
         let sections = self.active_sidebar_sections(cx);
         pins.retain(|id| {
@@ -5409,6 +5414,9 @@ impl Shell {
     }
 
     fn raw_sidebar_pins(&self, cx: &App) -> Vec<String> {
+        if !self.state.read(cx).t3_sidebar.is_empty() {
+            return self.active_sidebar_pins(cx);
+        }
         if let Some(pins) = self.optimistic_sidebar_pins(cx) {
             return pins;
         }
@@ -5473,6 +5481,15 @@ impl Shell {
         {
             return false;
         }
+        if self
+            .state
+            .read(cx)
+            .t3_sidebar
+            .contains_key(change.session_id())
+        {
+            self.mutate(serde_json::json!({"op":"changeChatPin","chatId":change.session_id(),"change":change}), cx);
+            return true;
+        }
         match self.state.read(cx).workspace_scope {
             Some(WorkspaceScope::Local) => {
                 if pinned_session_ids.is_empty() {
@@ -5497,6 +5514,13 @@ impl Shell {
     fn set_chat_pinned(&mut self, chat_id: String, pinned: bool, cx: &mut Context<Self>) {
         self.close_chat_menu(cx);
         self.cancel_pinned_session_drag(cx);
+        if self.state.read(cx).t3_sidebar.contains_key(&chat_id) {
+            self.mutate(
+                serde_json::json!({"op":if pinned {"pinChat"} else {"unpinChat"},"chatId":chat_id}),
+                cx,
+            );
+            return;
+        }
         let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
             return;
         };
@@ -5536,6 +5560,180 @@ impl Shell {
             self.assign_sidebar_section(&chat_id, None, cx);
         }
         cx.notify();
+    }
+
+    fn render_t3_chat_actions(
+        &self,
+        chat_id: &str,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let state = self.state.read(cx);
+        let Some(thread) = state.t3_sidebar.get(chat_id) else {
+            return Vec::new();
+        };
+        let now = Utc::now();
+        let mut actions = Vec::new();
+        if thread.capabilities.thread_settlement {
+            actions.push((
+                if thread.is_settled() {
+                    "unsettleChat"
+                } else {
+                    "settleChat"
+                },
+                if thread.is_settled() {
+                    "Un-settle thread"
+                } else {
+                    "Settle thread"
+                },
+                icons::CHECK,
+                serde_json::Value::Null,
+            ));
+        }
+        if thread.is_snoozed(now) {
+            actions.push((
+                "wakeChat",
+                "Wake thread",
+                icons::CLOCK_CIRCLE,
+                serde_json::Value::Null,
+            ));
+        }
+        if thread.capabilities.thread_visited_tracking {
+            actions.push((
+                "markChatUnread",
+                "Mark unread",
+                icons::BELL,
+                serde_json::Value::Null,
+            ));
+        }
+        if thread.capabilities.thread_auto_settle_opt_out {
+            actions.push((
+                "setChatAutoSettle",
+                if thread.auto_settle_enabled() {
+                    "Disable automatic settling"
+                } else {
+                    "Enable automatic settling"
+                },
+                icons::CHECKLIST,
+                serde_json::json!(!thread.auto_settle_enabled()),
+            ));
+        }
+        if thread.capabilities.thread_title_regeneration && thread.title_regeneration.is_none() {
+            actions.push((
+                "regenerateChatTitle",
+                "Regenerate title",
+                icons::PEN,
+                serde_json::Value::Null,
+            ));
+        }
+        let mut rows: Vec<AnyElement> = actions
+            .into_iter()
+            .map(|(op, label, glyph, enabled)| {
+                let params = serde_json::json!({"op":op,"chatId":chat_id,"enabled":enabled});
+                popover::menu_row(theme, false, format!("t3-chat-{op}-{chat_id}"))
+                    .id(SharedString::from(format!("t3-chat-{op}")))
+                    .tab_index(0)
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.close_chat_menu(cx);
+                        this.mutate(params.clone(), cx);
+                    }))
+                    .child(icon(glyph).size(px(16.0)).text_color(theme.text_muted))
+                    .child(label)
+                    .into_any_element()
+            })
+            .collect();
+        if thread.capabilities.thread_snooze && !thread.is_snoozed(now) {
+            let enabled = thread.can_snooze(now);
+            rows.insert(
+                usize::from(thread.capabilities.thread_settlement),
+                popover::menu_row(theme, false, format!("t3-chat-snooze-{chat_id}"))
+                    .id("t3-chat-snooze")
+                    .tab_index(if enabled { 0 } else { -1 })
+                    .role(gpui::Role::MenuItem)
+                    .aria_label("Snooze thread")
+                    .when(!enabled, |row| row.opacity(0.4).cursor_default())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !enabled {
+                            return;
+                        }
+                        if let Some(menu) = this.chat_menu.open_mut() {
+                            menu.page = ChatMenuPage::Snooze;
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        icon(icons::CLOCK_CIRCLE)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(div().flex_1().child("Snooze"))
+                    .child(
+                        icon(icons::ALT_ARROW_RIGHT)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if !rows.is_empty() {
+            rows.push(popover::menu_separator().into_any_element());
+        }
+        rows
+    }
+
+    fn render_t3_snooze_actions(
+        &self,
+        chat_id: &str,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows = vec![
+            popover::menu_row(theme, false, "t3-snooze-back")
+                .id("t3-snooze-back")
+                .tab_index(0)
+                .role(gpui::Role::MenuItem)
+                .aria_label("Back to thread actions")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(menu) = this.chat_menu.open_mut() {
+                        menu.page = ChatMenuPage::Root;
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    icon(icons::ALT_ARROW_LEFT)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .child("Back")
+                .into_any_element(),
+            popover::menu_separator().into_any_element(),
+        ];
+        for (index, (label, until)) in zeron_t3::snooze_presets(chrono::Local::now())
+            .into_iter()
+            .enumerate()
+        {
+            let params = serde_json::json!({"op":"snoozeChat","chatId":chat_id,"until":until});
+            let label = format!(
+                "{label} ({})",
+                until.with_timezone(&chrono::Local).format("%a %H:%M")
+            );
+            rows.push(
+                popover::menu_row(theme, false, format!("t3-snooze-{index}"))
+                    .id(("t3-snooze", index))
+                    .tab_index(0)
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(label.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.close_chat_menu(cx);
+                        this.mutate(params.clone(), cx);
+                    }))
+                    .child(label)
+                    .into_any_element(),
+            );
+        }
+        rows
     }
 
     /// The Archive session shortcut. With no chat open, or with an already
@@ -9791,7 +9989,11 @@ impl Shell {
                     .chats
                     .iter()
                     .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
-            let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            let t3_sidebar = self.state.read(cx).t3_sidebar.get(&chat_id).cloned();
+            let is_pinned = t3_sidebar
+                .as_ref()
+                .map(|thread| thread.pinned_at.is_some())
+                .unwrap_or_else(|| self.active_sidebar_pins(cx).contains(&chat_id));
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -9806,6 +10008,7 @@ impl Shell {
             let menu = match menu_state.page {
                 _ if chat_id.is_empty() => menu,
                 ChatMenuPage::Root => menu
+                    .children(self.render_t3_chat_actions(&chat_id, &theme, cx))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
                             .id("chat-menu-rename")
@@ -9822,14 +10025,33 @@ impl Shell {
                             .child(SharedString::from("Rename")),
                     )
                     .when(!is_side_chat, |menu| {
-                        menu.child(
-                            popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
-                                .id("chat-menu-pin")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_chat_pinned(pin_id.clone(), !is_pinned, cx)
-                                }))
-                                .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
-                                .child(SharedString::from(if is_pinned { "Unpin" } else { "Pin" })),
+                        menu.when(
+                            t3_sidebar
+                                .as_ref()
+                                .is_none_or(|thread| thread.capabilities.thread_pinning),
+                            |menu| {
+                                menu.child(
+                                    popover::menu_row(
+                                        &theme,
+                                        false,
+                                        format!("chat-menu-pin-{chat_id}"),
+                                    )
+                                    .id("chat-menu-pin")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_chat_pinned(pin_id.clone(), !is_pinned, cx)
+                                    }))
+                                    .child(
+                                        icon(icons::PIN)
+                                            .size(px(16.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(SharedString::from(if is_pinned {
+                                        "Unpin"
+                                    } else {
+                                        "Pin"
+                                    })),
+                                )
+                            },
                         )
                         .child(
                             popover::menu_row(
@@ -9884,6 +10106,9 @@ impl Shell {
                             )
                             .child(SharedString::from("Delete…")),
                     ),
+                ChatMenuPage::Snooze => {
+                    menu.children(self.render_t3_snooze_actions(&chat_id, &theme, cx))
+                }
                 ChatMenuPage::Copy => {
                     let chat = self
                         .state
@@ -13276,8 +13501,7 @@ impl Render for Shell {
         // scheduling `with_animation` would have requested). Hover color fades
         // ride the same clock; their once-per-frame tick lives here (this is
         // the window's root render — it runs exactly once per frame).
-        if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active()
-        {
+        if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active() {
             window.request_animation_frame();
         }
 
@@ -15669,7 +15893,10 @@ mod exit_regressions {
                 });
                 shell.settings.space_filter = None;
                 shell.open_chat("elsewhere".into(), cx);
-                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("other"));
+                assert_eq!(
+                    shell.state.read(cx).selected_space.as_deref(),
+                    Some("other")
+                );
                 shell.open_new_session(None, cx);
                 let state = shell.state.read(cx);
                 assert!(state.selected_chat.is_none());
