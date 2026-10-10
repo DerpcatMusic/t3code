@@ -47,7 +47,7 @@ fn panel_page(count: usize, page: usize) -> std::ops::Range<usize> {
 }
 
 fn agent_provider_icon(driver: &str) -> &'static str {
-    match zeron_t3::projection::harness(driver) {
+    match zeron_t3::harness(driver) {
         Some("codex") => icons::OPENAI_MARK,
         Some("claude-code") => icons::CLAUDE_MARK,
         Some("cursor") => icons::CURSOR_MARK,
@@ -761,10 +761,10 @@ impl Shell {
 
     fn render_t3_agent_row(
         &mut self,
-        agent: &zeron_t3::projection::AgentDetails,
+        agent: &zeron_t3::AgentDetails,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        use zeron_t3::projection::AgentStatus;
+        use zeron_t3::AgentStatus;
         let theme = Theme::of(cx).clone();
         let failed = agent.status == AgentStatus::Failed;
         let tone = if failed {
@@ -774,7 +774,7 @@ impl Shell {
         } else {
             theme.text_muted
         };
-        let title = zeron_t3::projection::agent_display_title(&agent.title);
+        let title = zeron_t3::agent_display_title(&agent.title);
         let child = agent.child_thread_id.clone();
         let can_open = child.is_some() && !agent.missing;
         let mut content = panel_control(&theme, format!("t3-agent-open-{}", agent.id))
@@ -953,6 +953,7 @@ impl Shell {
             card = card
                 .child(
                     div()
+                        .id("t3-project-path")
                         .px(px(8.0))
                         .py(px(4.0))
                         .text_size(crate::typography::ui_rems(11.0))
@@ -1233,7 +1234,7 @@ impl Shell {
                 .collect();
             let running = active
                 .iter()
-                .filter(|a| a.status == zeron_t3::projection::AgentStatus::Running)
+                .filter(|a| a.status == zeron_t3::AgentStatus::Running)
                 .count();
             card = card
                 .child(div().h(px(1.0)).mx(px(8.0)).my(px(5.0)).bg(theme.border))
@@ -1264,10 +1265,10 @@ impl Shell {
                         let id = related.thread_id.clone();
                         let missing = related.missing;
                         let kind = match related.kind {
-                            zeron_t3::projection::RelationshipKind::Parent => "Parent",
-                            zeron_t3::projection::RelationshipKind::Fork => "Fork",
-                            zeron_t3::projection::RelationshipKind::Subagent => "Agent",
-                            zeron_t3::projection::RelationshipKind::Transfer => "Transfer",
+                            zeron_t3::RelationshipKind::Parent => "Parent",
+                            zeron_t3::RelationshipKind::Fork => "Fork",
+                            zeron_t3::RelationshipKind::Subagent => "Agent",
+                            zeron_t3::RelationshipKind::Transfer => "Transfer",
                         };
                         card = card.child(
                             panel_control(&theme, format!("t3-related-{id}"))
@@ -1283,12 +1284,8 @@ impl Shell {
                                 )
                                 .child(div().flex_1().min_w(px(0.0)).truncate().child(
                                     SharedString::from(
-                                        if related.kind
-                                            == zeron_t3::projection::RelationshipKind::Subagent
-                                        {
-                                            zeron_t3::projection::agent_display_title(
-                                                &related.title,
-                                            )
+                                        if related.kind == zeron_t3::RelationshipKind::Subagent {
+                                            zeron_t3::agent_display_title(&related.title)
                                         } else {
                                             related.title.clone()
                                         },

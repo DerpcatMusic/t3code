@@ -9,7 +9,10 @@ mod transport;
 mod workspace;
 
 pub use attachments::{attachment_path, parse_attachment_path, visual_reference};
-pub use projection::{GitStats, ThreadDetails};
+pub use projection::{
+    AgentDetails, AgentOrigin, AgentStatus, GitStats, RelatedThreadDetails, RelationshipKind,
+    ThreadDetails, agent_display_title,
+};
 pub use sidebar::{
     SidebarCapabilities, SidebarSection, SidebarThread, sidebar_pins, snooze_presets,
 };
@@ -17,7 +20,8 @@ pub use sidebar::{
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use projection::{Projection, Shell, approval_choices, harness, option_map, rows, text};
+pub use projection::harness;
+use projection::{Projection, Shell, approval_choices, option_map, rows, text};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},

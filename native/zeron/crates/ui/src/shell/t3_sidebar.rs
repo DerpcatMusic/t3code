@@ -3,8 +3,9 @@
 //! and collapse. The footer remains owned by the shell.
 
 use super::*;
-use spaces::ActiveChatRow;
+use spaces::{ActiveChatRow, SIDEBAR_SECTION_GAP};
 use std::collections::HashMap;
+use zeron_proto::SidebarSection;
 use zeron_t3::SidebarSection as LifecycleSection;
 
 pub(super) const SETTLED_PAGE_SIZE: usize = 25;
@@ -400,6 +401,9 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(10.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text_muted)
+                                .id(SharedString::from(format!(
+                                    "t3-agent-count-{total}-{active}"
+                                )))
                                 .aria_label(format!("{total} agents, {active} active"))
                                 .tooltip(crate::settings::widgets::text_tooltip_above(format!(
                                     "{total} agents, {active} active"

@@ -36,7 +36,7 @@ def read():
             if kind=='J': frames.put(json.loads(payload))
             elif kind=='S': states.append((ident,json.loads(payload)))
     except Exception:frames.put(None)
-threading.Thread(target=read,daemon=True).start()
+reader=threading.Thread(target=read,daemon=True);reader.start()
 def send(cmd,ident=1,**fields):
     payload=json.dumps(dict(id=ident,cmd=cmd,**fields)).encode();process.stdin.write(struct.pack('<I',len(payload))+payload);process.stdin.flush()
 def evaluate(script,ident=1):
@@ -83,6 +83,16 @@ try:
     assert evaluate('document.body.dataset.account',3)=='yes'
     assert (profile/'cookies.sqlite').exists()
     assert all(path.stat().st_mode & 0o077 == 0 for path in profile.rglob('*'))
+    for ident in range(1,6):send('close',ident=ident)
+    process.stdin.close();process.wait(timeout=10);reader.join(timeout=2)
+    assert not reader.is_alive()
+    process=subprocess.Popen([str(helper)],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,start_new_session=True)
+    reader=threading.Thread(target=read,daemon=True);reader.start()
+    send('create',ident=2,t3Profile=str(profile));send('load',ident=2,url=origin+'/settings/connections')
+    wait_for("document.body.dataset.account",lambda value:value=='yes',2)
+    assert evaluate('document.body.dataset.auth',2)=='no', 'The host bootstrap cookie must not persist'
+    send('load-session',ident=2,origin=origin,url=origin+'/settings/connections',cookieName='z3_test',accessToken=token)
+    wait_for("document.body.dataset.auth",lambda value:value=='yes',2)
     print('Embedded WebKit: interactive sandbox, bootstrap cookie, shared private T3 profile, preview isolation, same-session popup and private auth chrome passed.')
 finally:
     try:

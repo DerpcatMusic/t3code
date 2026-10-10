@@ -32,8 +32,6 @@ pub(super) struct T3Permissions {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[gpui::test]
     fn permissions_follow_the_selected_t3_thread_and_close_on_navigation(
         cx: &mut gpui::TestAppContext,
@@ -78,7 +76,7 @@ impl T3Permissions {
 }
 
 impl Composer {
-    pub(super) fn is_t3(&self, cx: &App) -> bool {
+    pub(crate) fn is_t3(&self, cx: &App) -> bool {
         self.state
             .read(cx)
             .engine()
@@ -125,7 +123,7 @@ impl Composer {
                     this.t3_permissions.busy = None;
                 }
                 if let Err(error) = result {
-                    this.failure = Some(format!("Permissions could not change: {error}"));
+                    this.failure = Some(format!("Permissions could not change: {error}").into());
                     this.failure_key = Some(chat_id.clone());
                 }
                 cx.notify();

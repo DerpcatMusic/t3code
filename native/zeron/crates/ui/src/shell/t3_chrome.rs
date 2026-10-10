@@ -45,15 +45,17 @@ impl Shell {
         }
         let theme = Theme::of(cx).clone();
         Some(
-            window_control_button(
-                "toggle-t3-project-panel",
-                icons::GIT_BRANCH,
-                "Project and agents",
-                &theme,
-                cx.listener(|this, _, _, cx| this.toggle_t3_panel(cx)),
-            )
-            .when(self.t3_panel_visible(cx), |el| el.bg(theme.glass_hover()))
-            .into_any_element(),
+            div()
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .when(self.t3_panel_visible(cx), |el| el.bg(theme.glass_hover()))
+                .child(window_control_button(
+                    "toggle-t3-project-panel",
+                    icons::GIT_BRANCH,
+                    "Project and agents",
+                    &theme,
+                    cx.listener(|this, _, _, cx| this.toggle_t3_panel(cx)),
+                ))
+                .into_any_element(),
         )
     }
 

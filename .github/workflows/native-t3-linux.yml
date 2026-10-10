@@ -110,8 +110,9 @@ jobs:
           LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_sidebar::tests -j2
           LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_chrome::tests -j2
           LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_permissions::tests -j2
+          LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib queue::tests -j2
           LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_settings::tests -j2
-          LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib actions_ui::tests -j2
+          LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_panel_logic_tests -j2
       - name: Native desktop
         run: cargo build --release --locked -p zeron --bin zeron -j2
       - name: Separate preference paths

@@ -455,13 +455,25 @@ impl Composer {
             _ => queue_row_text(&item.text, &item.attachments),
         };
 
+        let can_edit = !self.is_t3(cx) || {
+            let state = self.state.read(cx);
+            let capability = zeron_proto::capabilities::MESSAGE_QUEUE_EDIT_LEASE_V1;
+            state
+                .engine()
+                .is_some_and(|engine| engine.engine_info().supports(capability))
+                && state.chat_host_supports(chat_id, capability)
+        };
         let edit_id = item.id.clone();
         let edit = self.queue_action(
             &key,
             "edit",
-            "Edit",
+            if can_edit {
+                "Edit"
+            } else {
+                "Queue editing is not available in this client yet"
+            },
             icons::PEN,
-            !being_removed,
+            !being_removed && can_edit,
             theme,
             cx.listener(move |this, _, _, cx| {
                 this.begin_queue_edit(edit_id.clone(), cx);
@@ -1043,7 +1055,11 @@ impl Composer {
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     ) -> AnyElement {
         let tooltip = if enabled {
-            action.tooltip()
+            if matches!(action, QueuePrimaryAction::SendNow) && self.is_t3(cx) {
+                "Interrupt the active turn and resume the T3 queue"
+            } else {
+                action.tooltip()
+            }
         } else {
             "Waiting for provider capabilities"
         };
@@ -1288,6 +1304,12 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         match action {
+            QueuePrimaryAction::SendNext if self.is_t3(cx) => self.queue_rpc(
+                methods::MOVE_QUEUED_MESSAGE,
+                serde_json::json!({"id":id, "toIndex":0}),
+                "Couldn't move that message to the next turn",
+                cx,
+            ),
             QueuePrimaryAction::Steer | QueuePrimaryAction::SendNext => self.queue_rpc(
                 methods::STEER_QUEUED_MESSAGE_NOW,
                 serde_json::json!({ "id": id }),
