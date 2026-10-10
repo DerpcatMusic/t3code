@@ -204,6 +204,12 @@ impl Shell {
 
     /// Open a session from the sidebar: select it, the main area follows.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if let Some(thread) = self.state.read(cx).t3_sidebar.get(&chat_id) {
+            self.sidebar_t3_section = match thread.section(Utc::now()) {
+                zeron_t3::SidebarSection::Working => zeron_t3::SidebarSection::Active,
+                section => section,
+            };
+        }
         self.command_palette = None;
         // Opening any session steps the voice stage aside — including the one
         // already selected under it. The call keeps running in the background.
@@ -410,7 +416,8 @@ impl Shell {
             .and_then(|id| self.state.read(cx).t3_details.get(id))
             .cloned();
         let details_width = if t3_details.is_some() && !takeover {
-            240.0
+            (self.viewport_width - row_left - right_pad - trailing_width - 140.0)
+                .clamp(110.0, 240.0)
         } else {
             0.0
         };
@@ -550,6 +557,31 @@ impl Shell {
         // the side-chat header carries, so a family reads the same from
         // either end.
         let session_controls = (!takeover && !on_canvas).then(|| {
+            let state = self.state.read(cx);
+            if let Some((id, thread)) = state.selected_chat.as_ref()
+                .and_then(|id| state.t3_sidebar.get(id).map(|thread| (id, thread)))
+            {
+                if !thread.capabilities.thread_settlement {
+                    return div().into_any_element();
+                }
+                let settled = thread.is_settled();
+                let label = if settled { "Unsettle" } else { "Settle" };
+                let params = serde_json::json!({"op":if settled {"unsettleChat"} else {"settleChat"},"chatId":id});
+                return div()
+                    .id("t3-settle-thread").flex_none().h(px(28.0)).px(px(8.0))
+                    .flex().items_center().gap(px(5.0))
+                    .rounded(px(Theme::CONTROL_RADIUS))
+                    .border_1().border_color(theme.border)
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .hover(|el| el.bg(theme.glass_hover()).text_color(theme.text))
+                    .focus_visible(|el| el.bg(crate::theme::card_selected_bg()))
+                    .tab_index(0).role(gpui::Role::Button).aria_label(label)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.mutate(params.clone(), cx)))
+                    .child(icon(icons::CHECK).size(px(14.0)).text_color(theme.text_muted))
+                    .child(label).into_any_element();
+            }
             let busy = self.side_chat_creating;
             div()
                 .flex_none()
@@ -581,6 +613,7 @@ impl Shell {
                     .aria_label("Fork this session")
                     .when(busy, |el| el.opacity(0.4)),
                 )
+                .into_any_element()
         });
         let available_titlebar_width = if session_controls.is_some() {
             (available_titlebar_width - SESSION_CONTROLS_WIDTH).max(0.0)
@@ -642,7 +675,7 @@ impl Shell {
                                     .min_w_0()
                                     .truncate()
                                     .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.text_muted.opacity(0.5))
+                                    .text_color(theme.text_muted)
                                     .child(target),
                             )
                         }),
@@ -652,9 +685,15 @@ impl Shell {
             .children(session_controls)
             .children(actions)
             .when_some(t3_details.filter(|_| !takeover), |el, details| {
-                let branch = details.git.as_ref().and_then(|git| git.branch.as_deref())
-                    .or(details.branch.as_deref()).unwrap_or("Workspace");
-                let changes = details.git.as_ref()
+                let branch = details
+                    .git
+                    .as_ref()
+                    .and_then(|git| git.branch.as_deref())
+                    .or(details.branch.as_deref())
+                    .unwrap_or("Workspace");
+                let changes = details
+                    .git
+                    .as_ref()
                     .map(|git| format!("+{} / −{}", git.additions, git.deletions))
                     .unwrap_or_default();
                 let context = details
@@ -664,7 +703,7 @@ impl Shell {
                 el.child(
                     div()
                         .id("t3-thread-details")
-                        .w(px(240.0))
+                        .w(px(details_width))
                         .flex_none()
                         .flex()
                         .flex_col()
@@ -677,7 +716,13 @@ impl Shell {
                                 .gap(px(6.0))
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text)
-                                .child(div().flex_1().min_w_0().truncate().child(gpui::SharedString::from(branch.to_owned())))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(gpui::SharedString::from(branch.to_owned())),
+                                )
                                 .child(div().flex_none().child(gpui::SharedString::from(changes))),
                         )
                         .child(
@@ -686,8 +731,13 @@ impl Shell {
                                 .gap(px(6.0))
                                 .text_size(crate::typography::ui_rems(10.0))
                                 .text_color(theme.text_muted)
-                                .child(div().flex_1().min_w_0().truncate().child(gpui::SharedString::from(format!("{}{context}", details.model))))
-                                .child(div().flex_none().child(gpui::SharedString::from(format!("{}/{} agents", details.active_agents, details.total_agents)))),
+                                .child(div().flex_1().min_w_0().truncate().child(
+                                    gpui::SharedString::from(format!("{}{context}", details.model)),
+                                ))
+                                .child(div().flex_none().child(gpui::SharedString::from(format!(
+                                    "{}/{} agents",
+                                    details.active_agents, details.total_agents
+                                )))),
                         ),
                 )
             })

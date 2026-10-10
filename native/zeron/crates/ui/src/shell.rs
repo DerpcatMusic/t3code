@@ -1997,6 +1997,7 @@ pub struct Shell {
     chat_hover_resync: bool,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
+    sidebar_t3_section: zeron_t3::SidebarSection,
     /// In-flight reorder for the pinned section only.
     pinned_session_drag: Option<PinnedSessionDragState>,
     pinned_session_drag_generation: u64,
@@ -2464,6 +2465,7 @@ impl Shell {
             chat_status_hover: None,
             chat_hover_resync: false,
             sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_t3_section: zeron_t3::SidebarSection::Active,
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
@@ -7604,6 +7606,13 @@ impl Shell {
                 .into_any_element()
         });
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
+        let settlement = self
+            .state
+            .read(cx)
+            .t3_sidebar
+            .get(&id)
+            .filter(|thread| !archived && thread.capabilities.thread_settlement)
+            .map(|thread| thread.is_settled());
         let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
             // The jump hint replaces the status/time corner while the modifier
             // is held, cut to the sidebar PR badge's exact cloth
@@ -7645,7 +7654,9 @@ impl Shell {
                         .hover(|s| s.bg(crate::theme::wash(0.18)))
                 })
                 .child(
-                    icon(if archived {
+                    icon(if settlement.is_some() {
+                        icons::CHECK
+                    } else if archived {
                         icons::ARCHIVE_UP_MINIMALISTIC
                     } else {
                         icons::ARCHIVE_MINIMALISTIC
@@ -7663,7 +7674,9 @@ impl Shell {
                         div()
                             .text_size(crate::typography::ui_rems(10.0))
                             .text_color(theme.text_muted)
-                            .child(SharedString::from(if archived {
+                            .child(SharedString::from(if let Some(settled) = settlement {
+                                if settled { "Unsettle" } else { "Settle" }
+                            } else if archived {
                                 "Unarchive"
                             } else {
                                 "Archive"
@@ -7776,10 +7789,16 @@ impl Shell {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.chat_hover_resync = true;
-                            this.set_chat_archived(archive_id.clone(), !archived, cx);
+                            if let Some(settled) = settlement {
+                                this.mutate(serde_json::json!({"op":if settled {"unsettleChat"} else {"settleChat"},"chatId":archive_id}), cx);
+                            } else {
+                                this.set_chat_archived(archive_id.clone(), !archived, cx);
+                            }
                         }))
                         // Above the pill: below it the chip would cover the next row.
-                        .tooltip(crate::settings::widgets::text_tooltip_above(if archived {
+                        .tooltip(crate::settings::widgets::text_tooltip_above(if let Some(settled) = settlement {
+                            if settled { "Unsettle thread" } else { "Settle thread" }
+                        } else if archived {
                             "Unarchive session"
                         } else {
                             ShortcutId::ArchiveSession.label()
@@ -8584,6 +8603,7 @@ impl Shell {
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
+        let inbox_tabs = self.render_t3_inbox_tabs(theme, cx);
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
@@ -8706,6 +8726,11 @@ impl Shell {
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.sidebar_scroll)
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        if !this.state.read(cx).t3_sidebar.is_empty() {
+                            cx.notify();
+                        }
+                    }))
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
                             if let Some(transfer) = this.sidebar_session_transfer.as_mut() {
@@ -8749,7 +8774,13 @@ impl Shell {
         let update_strip = self.render_update_strip(theme, cx);
         // Stacked above the update strip, the banner needs its own gap; alone
         // it leans on the user-menu block's padding like the strip does.
-        let github_star_banner = self.render_github_star_banner(update_strip.is_some(), theme, cx);
+        let github_star_banner = self
+            .state
+            .read(cx)
+            .t3_sidebar
+            .is_empty()
+            .then(|| self.render_github_star_banner(update_strip.is_some(), theme, cx))
+            .flatten();
 
         div()
             .w(px(self.settings.sidebar_width))
@@ -8759,6 +8790,7 @@ impl Shell {
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(filter_row)
+            .children(inbox_tabs)
             .child(sidebar_lists)
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —

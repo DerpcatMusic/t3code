@@ -39,6 +39,10 @@ pub enum SidebarSection {
 }
 
 impl SidebarSection {
+    pub fn includes(self, section: Self) -> bool {
+        self == section || (self == Self::Active && section == Self::Working)
+    }
+
     pub fn group(self) -> (String, String) {
         let (key, label) = match self {
             Self::Active => ("status:0", "Active"),
@@ -603,6 +607,18 @@ pub fn snooze_presets(now: DateTime<Local>) -> Vec<(&'static str, DateTime<Utc>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_views_keep_running_work_active_and_separate_finished_and_snoozed_work() {
+        assert!(SidebarSection::Active.includes(SidebarSection::Active));
+        assert!(SidebarSection::Active.includes(SidebarSection::Working));
+        assert!(!SidebarSection::Active.includes(SidebarSection::Settled));
+        assert!(!SidebarSection::Active.includes(SidebarSection::Snoozed));
+        assert!(SidebarSection::Settled.includes(SidebarSection::Settled));
+        assert!(!SidebarSection::Settled.includes(SidebarSection::Working));
+        assert!(SidebarSection::Snoozed.includes(SidebarSection::Snoozed));
+        assert!(!SidebarSection::Snoozed.includes(SidebarSection::Active));
+    }
     fn thread() -> SidebarThread {
         let now = Utc::now();
         SidebarThread::from_shell(

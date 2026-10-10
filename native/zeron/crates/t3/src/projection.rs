@@ -377,10 +377,7 @@ impl Projection {
         })
     }
     pub fn snapshot(frame: &Value) -> Result<Self> {
-        ensure!(
-            frame["hasMoreHistory"].as_bool() != Some(true),
-            "a bounded T3 snapshot requires history paging"
-        );
+        // The adapter marks opening tails historyPending until the full replay arrives.
         let projection = Self {
             value: frame["projection"].clone(),
             sequence: frame["snapshotSequence"]
@@ -447,6 +444,16 @@ impl Projection {
             if key == "turnItems" {
                 let visible = self.visible(payload);
                 let visible_rows = self.value["visibleTurnItems"].as_array_mut().unwrap();
+                if visible
+                    && let Some(row) = visible_rows.iter_mut().find(|row| {
+                        row["sourceItemId"] == payload["id"]
+                            && row["item"]["ordinal"] == payload["ordinal"]
+                    })
+                {
+                    // Token growth changes content, not timeline order.
+                    row["item"] = payload.clone();
+                    return Ok(true);
+                }
                 visible_rows.retain(|r| r["sourceItemId"] != payload["id"]);
                 if visible {
                     let insertion = visible_rows
@@ -468,6 +475,8 @@ impl Projection {
                     .cloned()
                     .collect();
                 self.value["visibleTurnItems"] = json!(retained);
+            } else if key != "turnItems" {
+                return Ok(true);
             }
         }
         if let Some(values) = self.value["visibleTurnItems"].as_array_mut() {
@@ -511,10 +520,77 @@ impl Projection {
     }
 
     pub fn entries(&self, environment: &str) -> Result<Vec<SessionMessageEntry>> {
-        rows(&self.value, "visibleTurnItems")?
-            .iter()
-            .map(|row| self.entry(&row["item"], environment))
+        self.entry_groups()?
+            .into_iter()
+            .map(|group| self.group_entry(&group, environment))
             .collect()
+    }
+
+    fn entry_groups(&self) -> Result<Vec<Vec<&Value>>> {
+        let mut groups: Vec<Vec<&Value>> = Vec::new();
+        for row in rows(&self.value, "visibleTurnItems")? {
+            let item = &row["item"];
+            // Checkpoints are workspace metadata, not provider tool calls.
+            if item["type"] == "checkpoint" {
+                continue;
+            }
+            let joins = groups.last().is_some_and(|group| {
+                let previous = group.last().unwrap();
+                !item["runId"].is_null()
+                    && item["runId"] == previous["runId"]
+                    && item["threadId"] == previous["threadId"]
+                    && !matches!(
+                        item["type"].as_str(),
+                        Some("user_message" | "system_notice" | "notification")
+                    )
+                    && !matches!(
+                        previous["type"].as_str(),
+                        Some("user_message" | "system_notice" | "notification")
+                    )
+            });
+            if joins {
+                groups.last_mut().unwrap().push(item);
+            } else {
+                groups.push(vec![item]);
+            }
+        }
+        Ok(groups)
+    }
+
+    fn group_entry(&self, group: &[&Value], environment: &str) -> Result<SessionMessageEntry> {
+        let mut entry = self.entry(group[0], environment)?;
+        for item in &group[1..] {
+            let next = self.entry(item, environment)?;
+            entry.parts.extend(next.parts);
+            entry.status = next.status;
+        }
+        entry.status = Some(self.group_status(group)?);
+        Ok(entry)
+    }
+
+    fn group_status(&self, group: &[&Value]) -> Result<zeron_doc::MessageStatus> {
+        if rows(&self.value, "runs")?.iter().any(|run| {
+            run["id"] == group[0]["runId"]
+                && matches!(
+                    run["status"].as_str(),
+                    Some("completed" | "cancelled" | "failed")
+                )
+        }) {
+            return Ok(zeron_doc::MessageStatus::Complete);
+        }
+        let last = group.last().unwrap();
+        Ok(
+            if last["streaming"] == true
+                || matches!(
+                    last["status"].as_str(),
+                    Some("running" | "pending" | "in_progress")
+                )
+            {
+                zeron_doc::MessageStatus::Streaming
+            } else {
+                zeron_doc::MessageStatus::Complete
+            },
+        )
     }
 
     pub fn transcript_delta(
@@ -531,11 +607,31 @@ impl Projection {
         }
         // Streaming updates decode only the changed item, retaining native text-tail deltas.
         let item = &frame["event"]["payload"];
-        let visible = rows(&self.value, "visibleTurnItems")?;
-        let position = visible
+        let groups = self.entry_groups()?;
+        let position = groups
             .iter()
-            .position(|row| row["sourceItemId"] == item["id"]);
-        let id = item["messageId"].as_str().unwrap_or(text(item, "id")?);
+            .position(|group| group.iter().any(|row| row["id"] == item["id"]));
+        // Insertion/removal can merge or split adjacent work groups.
+        if groups.len() != previous.len()
+            || groups.iter().zip(previous.iter()).any(|(group, entry)| {
+                group[0]["messageId"].as_str().or(group[0]["id"].as_str())
+                    != Some(entry.id.as_str())
+                    || group.len() != entry.parts.len()
+                    || group
+                        .iter()
+                        .zip(&entry.parts)
+                        .any(|(item, part)| item["id"].as_str() != Some(part.id()))
+            })
+        {
+            let next = self.entries(environment)?;
+            let delta = zeron_doc::diff_transcript(previous, &next);
+            *previous = next;
+            return Ok(delta);
+        }
+        let id = position
+            .map(|position| previous[position].id.as_str())
+            .unwrap_or(text(item, "id")?)
+            .to_owned();
         let old = previous.iter().position(|entry| entry.id == id);
         let mut delta = TranscriptFrame::Delta {
             upsert: vec![],
@@ -545,7 +641,15 @@ impl Projection {
         };
         match (position, old) {
             (Some(position), old) => {
-                let next = self.entry(&visible[position]["item"], environment)?;
+                let changed = self.entry(item, environment)?;
+                let mut next = previous[position].clone();
+                let part = next
+                    .parts
+                    .iter_mut()
+                    .find(|part| part.id() == item["id"].as_str().unwrap_or(""))
+                    .context("changed T3 part missing from work group")?;
+                *part = changed.parts.into_iter().next().unwrap();
+                next.status = Some(self.group_status(&groups[position])?);
                 if let Some(old) = old {
                     if old == position {
                         delta = zeron_doc::diff_transcript(
@@ -596,6 +700,8 @@ impl Projection {
             "reasoning" => json!({"kind":"reasoning","id":id,"text":item["text"]}),
             "proposed_plan" => json!({"kind":"text","id":id,"text":item["markdown"]}),
             "system_notice" => json!({"kind":"text","id":id,"text":item["message"]}),
+            "run_interrupt_request" => json!({"kind":"text","id":id,"text":"Stop requested."}),
+            "run_interrupt_result" => json!({"kind":"text","id":id,"text":"Agent stopped."}),
             "error" => {
                 json!({"kind":"error","id":id,"message":item["failure"]["message"].as_str().unwrap_or("Provider failed")})
             }
@@ -675,6 +781,68 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_turn_groups_reasoning_and_tools_without_fake_checkpoint_calls() {
+        let items = vec![
+            json!({"id":"user","type":"user_message","text":"Fix the bug","runId":"run"}),
+            json!({"id":"thought","type":"reasoning","text":"Checking the code","runId":"run"}),
+            json!({"id":"read","type":"command_execution","input":"cat src/lib.rs","output":"code","runId":"run"}),
+            json!({"id":"test","type":"command_execution","input":"cargo test","output":"passed","runId":"run"}),
+            json!({"id":"reply","type":"assistant_message","text":"Fixed","runId":"run","streaming":true,"status":"running"}),
+            json!({"id":"checkpoint","type":"checkpoint","runId":"run"}),
+        ].into_iter().enumerate().map(|(ordinal, mut item)| {
+            item["threadId"] = json!("thread");
+            item["ordinal"] = json!(ordinal);
+            item["startedAt"] = json!("2026-10-09T00:00:00Z");
+            item["updatedAt"] = json!("2026-10-09T00:00:00Z");
+            item
+        }).collect::<Vec<_>>();
+        let visible = items
+            .iter()
+            .map(|item| json!({"visibility":"local","sourceItemId":item["id"],"item":item}))
+            .collect::<Vec<_>>();
+        let mut projection = Projection::snapshot(&json!({"kind":"snapshot","snapshotSequence":1,"hasMoreHistory":true,"projection":{
+            "thread":{"id":"thread"},"runs":[{"id":"run","status":"running"}],"attempts":[],"runtimeRequests":[],"turnItems":items,"visibleTurnItems":visible
+        }})).unwrap();
+        let mut previous = projection.entries("env").unwrap();
+        assert_eq!(previous.len(), 2);
+        assert_eq!(
+            previous[1]
+                .parts
+                .iter()
+                .map(MessagePart::id)
+                .collect::<Vec<_>>(),
+            ["thought", "read", "test", "reply"]
+        );
+        let mut applied = previous.clone();
+        let mut reply = items[4].clone();
+        reply["text"] = json!("Fixed the bug.");
+        let frame = json!({"kind":"event","sequence":2,"event":{"type":"turn-item.updated","threadId":"thread","payload":reply}});
+        projection.apply(&frame).unwrap();
+        let delta = projection
+            .transcript_delta(&frame, "env", &mut previous)
+            .unwrap();
+        assert!(
+            matches!(&delta, TranscriptFrame::Delta { append, upsert, count: 2, .. } if append.len() == 1 && upsert.is_empty())
+        );
+        zeron_doc::apply_transcript_frame(&mut applied, delta).unwrap();
+        assert_eq!(applied, projection.entries("env").unwrap());
+        let mut extra = items[3].clone();
+        extra["id"] = json!("extra-tool");
+        extra["ordinal"] = json!(3);
+        let frame = json!({"kind":"event","sequence":3,"event":{"type":"turn-item.updated","threadId":"thread","payload":extra}});
+        projection.apply(&frame).unwrap();
+        let delta = projection
+            .transcript_delta(&frame, "env", &mut previous)
+            .unwrap();
+        zeron_doc::apply_transcript_frame(&mut applied, delta).unwrap();
+        assert_eq!(applied, projection.entries("env").unwrap());
+        assert_eq!(applied[1].parts.len(), 5);
+        projection.apply(&json!({"kind":"event","sequence":4,"event":{"type":"run.updated","threadId":"thread","payload":{"id":"run","status":"completed"}}})).unwrap();
+        let next = projection.entries("env").unwrap();
+        assert_eq!(next[1].status, Some(zeron_doc::MessageStatus::Complete));
+    }
 
     #[test]
     fn forks_stay_in_the_sidebar_but_delegated_children_do_not() {

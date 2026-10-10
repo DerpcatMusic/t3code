@@ -2233,7 +2233,7 @@ fn sidebar_disclosure_header(
             div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted.opacity(0.5))
+                .text_color(theme.text_muted)
                 .child(label),
         ))
         .child(div().flex_1())
@@ -4425,6 +4425,7 @@ impl Shell {
         let mut chats: Vec<zeron_proto::Chat> = state
             .sidebar_chats(now, filter.as_deref())
             .into_iter()
+            .filter(|(_, chat)| self.t3_sidebar_chat_visible(state, &chat.id, now))
             .map(|(_, chat)| chat.clone())
             .collect();
         chats.sort_by(|left, right| self.sidebar_chat_order(state, left, right, now));
@@ -4527,6 +4528,111 @@ impl Shell {
         } else {
             zeron_t3::SidebarSection::Active.group()
         }
+    }
+
+    fn t3_sidebar_chat_visible(
+        &self,
+        state: &AppState,
+        id: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> bool {
+        self.settings.sidebar_organization != SidebarOrganization::ByStatus
+            || state
+                .t3_sidebar
+                .get(id)
+                .is_none_or(|thread| self.sidebar_t3_section.includes(thread.section(now)))
+    }
+
+    pub(super) fn render_t3_inbox_tabs(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let state = self.state.read(cx);
+        if state.t3_sidebar.is_empty() {
+            return None;
+        }
+        let now = Utc::now();
+        let chats = state.sidebar_chats(now, self.settings.space_filter.as_deref());
+        let tabs = [
+            (zeron_t3::SidebarSection::Active, "Active"),
+            (zeron_t3::SidebarSection::Settled, "Settled"),
+            (zeron_t3::SidebarSection::Snoozed, "Snoozed"),
+        ]
+        .into_iter()
+        .map(|(section, label)| {
+            let count = chats
+                .iter()
+                .filter(|(_, chat)| {
+                    state
+                        .t3_sidebar
+                        .get(&chat.id)
+                        .is_some_and(|thread| section.includes(thread.section(now)))
+                })
+                .count();
+            let selected = self.settings.sidebar_organization == SidebarOrganization::ByStatus
+                && self.sidebar_t3_section == section;
+            div()
+                .id(SharedString::from(format!("t3-inbox-{label}")))
+                .flex_1()
+                .min_w_0()
+                .h(px(32.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .text_size(crate::typography::ui_rems(11.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .when(selected, |el| el.bg(crate::theme::card_selected_bg()))
+                .hover(|el| el.bg(theme.glass_hover()))
+                .focus_visible(|el| el.bg(crate::theme::card_selected_bg()))
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .aria_label(format!("{label}, {count} threads"))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.sidebar_t3_section = section;
+                    this.settings.sidebar_organization = SidebarOrganization::ByStatus;
+                    this.sidebar_scroll.set_offset(gpui::Point::default());
+                    this.sidebar_prev_order.clear();
+                    this.sidebar_resort.clear();
+                    this.sidebar_new_keys.clear();
+                    cx.notify();
+                }))
+                .when(section != zeron_t3::SidebarSection::Snoozed, |el| {
+                    el.on_drop(
+                        cx.listener(move |this, payload: &SidebarSessionDrag, _, cx| {
+                            cx.stop_propagation();
+                            this.finish_t3_status_transfer(
+                                payload,
+                                if section == zeron_t3::SidebarSection::Settled {
+                                    "settled"
+                                } else {
+                                    "active"
+                                },
+                                cx,
+                            );
+                        }),
+                    )
+                })
+                .child(SharedString::from(format!("{label} {count}")))
+                .into_any_element()
+        })
+        .collect::<Vec<_>>();
+        Some(
+            div()
+                .mx(px(Theme::SPACE_SM))
+                .mb(px(4.0))
+                .flex()
+                .gap(px(2.0))
+                .children(tabs)
+                .into_any_element(),
+        )
     }
 
     fn sidebar_custom_section_eligible(&self, state: &AppState, id: &str) -> bool {
@@ -4740,6 +4846,7 @@ impl Shell {
             let mut chats: Vec<_> = state
                 .sidebar_chats(now, filter.as_deref())
                 .into_iter()
+                .filter(|(_, chat)| self.t3_sidebar_chat_visible(state, &chat.id, now))
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
             chats.sort_by(|left, right| self.sidebar_chat_order(state, &left.1, &right.1, now));
@@ -4947,6 +5054,13 @@ impl Shell {
         let mut slot = 0usize;
         let mut rendered = Vec::new();
         let mut moving_row = None;
+        let windowed = !self.state.read(cx).t3_sidebar.is_empty()
+            && self.sidebar_session_transfer.is_none()
+            && self.sidebar_session_return.is_none()
+            && self.pinned_session_drag.is_none();
+        let viewport_top = -f32::from(self.sidebar_scroll.offset().y);
+        let viewport_height = f32::from(self.sidebar_scroll.bounds().size.height).max(600.0);
+        let mut content_y = SIDEBAR_LIST_PAD_TOP;
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
             let drag_group = if pinned_group {
@@ -4966,6 +5080,21 @@ impl Shell {
             let header_icon_chat = (project_group && self.settings.sidebar_show_project_icon)
                 .then(|| rows.first().map(|row| row.chat.id.clone()))
                 .flatten();
+            let collapsed = group.as_ref().is_some_and(|(key, _)| {
+                self.sidebar_collapsed_groups
+                    .contains(&self.sidebar_group_collapse_key(key))
+            });
+            let group_top = content_y;
+            content_y += if pinned_group {
+                SIDEBAR_DISCLOSURE_HEADER_HEIGHT + SIDEBAR_DISCLOSURE_BODY_INSET
+            } else if group.is_some() {
+                SIDEBAR_DISCLOSURE_SECTION_HEIGHT + SIDEBAR_DISCLOSURE_BODY_INSET
+            } else {
+                0.0
+            };
+            let actual_row_count = rows.len();
+            let mut spacer_height = 0.0;
+            let mut spacer_start = 0;
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
                 let ActiveChatRow {
@@ -4999,6 +5128,30 @@ impl Shell {
                     branch.is_some(),
                     change_request.is_some(),
                 );
+                let visible = !windowed
+                    || group.is_none()
+                    || is_selected
+                    || (!collapsed
+                        && content_y + height >= viewport_top - 120.0
+                        && content_y <= viewport_top + viewport_height + 120.0);
+                content_y += height + SIDEBAR_LIST_GAP;
+                if !visible {
+                    if spacer_height == 0.0 {
+                        spacer_start = group_index;
+                    }
+                    spacer_height += height + SIDEBAR_LIST_GAP;
+                    slot += 1;
+                    continue;
+                }
+                if spacer_height > 0.0 {
+                    let height = spacer_height - SIDEBAR_LIST_GAP;
+                    rendered_rows.push((
+                        format!("spacer:{drag_group}:{spacer_start}"),
+                        height,
+                        div().flex_none().h(px(height)).into_any_element(),
+                    ));
+                    spacer_height = 0.0;
+                }
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = visible_slots.get(&chat.id).copied();
@@ -5129,6 +5282,18 @@ impl Shell {
                 rendered_rows.push((format!("c:{}", chat.id), slot_height, element));
             }
 
+            if spacer_height > 0.0 {
+                let height = spacer_height - SIDEBAR_LIST_GAP;
+                rendered_rows.push((
+                    format!("spacer:{drag_group}:{spacer_start}"),
+                    height,
+                    div().flex_none().h(px(height)).into_any_element(),
+                ));
+            }
+            if collapsed {
+                content_y = group_top + SIDEBAR_DISCLOSURE_SECTION_HEIGHT;
+            }
+
             let Some((key, label)) = group else {
                 rendered.extend(rendered_rows);
                 if !pinned_group {
@@ -5190,7 +5355,7 @@ impl Shell {
             let visible_label: SharedString = if collapsed
                 || self.settings.sidebar_organization == SidebarOrganization::ByStatus
             {
-                format!("{label} ({row_count})").into()
+                format!("{label} ({actual_row_count})").into()
             } else {
                 label.into()
             };

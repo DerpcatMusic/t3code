@@ -6824,7 +6824,9 @@ impl Transcript {
                         div().w_full().flex().justify_end().child(
                             div()
                                 .min_w_0()
-                                .max_w(px(self.content_width * 0.8))
+                                .max_w(px(self.content_width.min(
+                                    f32::from(self.list.viewport_bounds().size.width).max(1.0),
+                                ) * 0.8))
                                 .bg(crate::theme::user_bubble_bg())
                                 .rounded(px(Theme::BUBBLE_RADIUS))
                                 .px(px(16.0))

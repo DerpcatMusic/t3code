@@ -3646,6 +3646,19 @@ impl Pickers {
                     crate::icons::GIT_BRANCH,
                     chat.branch
                         .clone()
+                        .or_else(|| {
+                            self.state
+                                .read(cx)
+                                .t3_details
+                                .get(&chat.id)
+                                .and_then(|details| {
+                                    details
+                                        .git
+                                        .as_ref()
+                                        .and_then(|git| git.branch.clone())
+                                        .or_else(|| details.branch.clone())
+                                })
+                        })
                         .map(SharedString::from)
                         .unwrap_or_else(|| SharedString::from("No ref")),
                     &theme,
@@ -3670,6 +3683,10 @@ impl Pickers {
                     })
                     .into_any_element(),
             );
+        }
+
+        if !self.state.read(cx).t3_sidebar.is_empty() {
+            return None;
         }
 
         // New-session draft: checkout + ref only, LEFT-aligned (device +

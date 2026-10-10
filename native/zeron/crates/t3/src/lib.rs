@@ -609,17 +609,26 @@ fn watch_values<T: Clone + Send + Sync + 'static>(
     map: impl Fn(&T) -> Result<Value> + Send + Sync + 'static,
 ) -> RpcReply {
     RpcReply::Stream(Box::pin(stream::unfold(
-        (rx, true, map),
-        |(mut rx, first, map)| async move {
-            if !first && rx.changed().await.is_err() {
-                return None;
-            }
-            let value = rx.borrow_and_update().clone();
-            match map(&value) {
-                Ok(value) => Some((value, (rx, false, map))),
-                Err(error) => {
-                    tracing::warn!(%error,"invalid T3 native view projection");
-                    None
+        (rx, true, map, None),
+        |(mut rx, mut first, map, mut previous)| async move {
+            loop {
+                if !first && rx.changed().await.is_err() {
+                    return None;
+                }
+                first = false;
+                let source = rx.borrow_and_update().clone();
+                match map(&source) {
+                    Ok(value) => {
+                        if previous.as_ref() == Some(&value) {
+                            continue;
+                        }
+                        previous = Some(value.clone());
+                        return Some((value, (rx, first, map, previous)));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error,"invalid T3 native view projection");
+                        return None;
+                    }
                 }
             }
         },
@@ -759,12 +768,35 @@ impl RpcService for T3Service {
                 let subscription = client
                     .subscribe_checked(
                         "orchestration.subscribeThread",
-                        json!({"threadId":id,"acceptBoundedSnapshot":false}),
+                        json!({"threadId":id,"acceptBoundedSnapshot":true}),
                     )
                     .await?;
-                let thread_events = stream::unfold(subscription, |mut rx| async move {
-                    Some(((false, Some(rx.recv().await?)), rx))
-                })
+                let history_client = client.clone();
+                let history_id = id.to_owned();
+                let thread_events = stream::unfold(
+                    (Some(subscription), false, history_client, history_id),
+                    |(mut rx, upgrade, client, id)| async move {
+                        if upgrade {
+                            // Show the recent turn immediately, then fill history from
+                            // a fresh authoritative snapshot without replaying writes.
+                            rx.take();
+                            rx = match client
+                                .subscribe_checked(
+                                    "orchestration.subscribeThread",
+                                    json!({"threadId":id,"acceptBoundedSnapshot":false}),
+                                )
+                                .await
+                            {
+                                Ok(rx) => Some(rx),
+                                Err(_) => return None,
+                            };
+                        }
+                        let frame = rx.as_mut()?.recv().await?;
+                        let upgrade =
+                            frame["kind"] == "snapshot" && frame["hasMoreHistory"] == true;
+                        Some(((false, Some(frame)), (rx, upgrade, client, id)))
+                    },
+                )
                 .chain(stream::once(async { (false, None) }));
                 // An optional Git read must not hold up the opening transcript.
                 let git_events = stream::once(async move {
@@ -794,6 +826,7 @@ impl RpcService for T3Service {
                         environment,
                         None::<GitStats>,
                         workspace_binding,
+                        false,
                     ),
                     |(
                         mut rx,
@@ -802,6 +835,7 @@ impl RpcService for T3Service {
                         environment,
                         mut git,
                         workspace_binding,
+                        mut history_pending,
                     )| async move {
                         loop {
                             let (git_event, frame) = rx.next().await?;
@@ -830,6 +864,7 @@ impl RpcService for T3Service {
                                     }
                                 } else if snapshot {
                                     projection = Some(Projection::snapshot(&frame)?);
+                                    history_pending = frame["hasMoreHistory"] == true;
                                 } else if let Some(p) = &mut projection {
                                     if !p.apply(&frame)? {
                                         return Ok(None);
@@ -877,6 +912,9 @@ impl RpcService for T3Service {
                                         .map(|next| TranscriptBaseline::capture(next)),
                                 };
                                 let mut value = serde_json::to_value(update)?;
+                                if history_pending {
+                                    value["historyPending"] = json!(true);
+                                }
                                 if git_event
                                     || snapshot
                                     || frame["event"]["type"] != "turn-item.updated"
@@ -898,6 +936,7 @@ impl RpcService for T3Service {
                                             environment,
                                             git,
                                             workspace_binding,
+                                            history_pending,
                                         ),
                                     ));
                                 }
@@ -923,6 +962,20 @@ impl RpcService for T3Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unchanged_shell_views_do_not_repaint_but_changes_are_delivered() {
+        let (tx, rx) = watch::channel(0);
+        let RpcReply::Stream(mut frames) = watch_values(rx, |n| Ok(json!(n))) else {
+            panic!("expected stream");
+        };
+        assert_eq!(frames.next().await, Some(json!(0)));
+        tx.send(1).unwrap();
+        assert_eq!(frames.next().await, Some(json!(1)));
+        tx.send(1).unwrap();
+        drop(tx);
+        assert_eq!(frames.next().await, None);
+    }
 
     #[test]
     fn model_catalog_preserves_select_and_boolean_controls() {
