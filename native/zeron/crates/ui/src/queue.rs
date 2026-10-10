@@ -514,6 +514,7 @@ impl Composer {
                 resolved_primary.is_some() && !being_removed,
             ),
             theme,
+            cx,
             cx.listener(move |this, _, _, cx| {
                 this.activate_queued_primary(primary_id.clone(), primary_action, cx);
             }),
@@ -1052,6 +1053,7 @@ impl Composer {
         enabled: bool,
         show_shortcut: bool,
         theme: &Theme,
+        cx: &gpui::App,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     ) -> AnyElement {
         let tooltip = if enabled {
