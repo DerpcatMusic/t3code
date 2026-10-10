@@ -39,8 +39,11 @@ mod tests {
         let (_dir, handle) = super::super::tests::composer_focus_window(cx);
         handle.update(cx, |composer, _, cx| {
             assert_eq!(composer.t3_runtime_mode(cx), "approval-required");
+            composer.t3_permissions.menu.open(0);
             composer.set_t3_runtime_mode("auto-accept-edits", cx);
+            assert!(!composer.t3_permissions.menu.is_open());
             assert_eq!(composer.t3_runtime_mode(cx), "auto-accept-edits");
+            composer.t3_permissions.menu.open(1);
             composer.state.update(cx, |state, _| {
                 state.selected_chat = Some("existing".into());
                 state.t3_details.insert("existing".into(), serde_json::from_value(serde_json::json!({
@@ -48,7 +51,6 @@ mod tests {
                 })).unwrap());
             });
             assert_eq!(composer.t3_runtime_mode(cx), "full-access");
-            composer.t3_permissions.menu.open(3);
             composer.on_state_changed(cx);
             assert!(!composer.t3_permissions.menu.is_open());
             composer.state.update(cx, |state, _| state.selected_chat = Some("loading".into()));
@@ -71,7 +73,7 @@ impl Default for T3Permissions {
 
 impl T3Permissions {
     pub(super) fn close_menu(&mut self) {
-        self.menu.finish_close();
+        self.menu = Default::default();
     }
 }
 
@@ -99,7 +101,7 @@ impl Composer {
         if self.t3_permissions.busy.is_some() {
             return;
         }
-        self.t3_permissions.menu.finish_close();
+        self.t3_permissions.close_menu();
         let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
             self.t3_permissions.new_mode = mode.into();
             cx.notify();
@@ -167,7 +169,7 @@ impl Composer {
                     return;
                 }
                 if this.t3_permissions.menu.take_press_was_open() {
-                    this.t3_permissions.menu.finish_close();
+                    this.t3_permissions.close_menu();
                 } else {
                     this.t3_permissions.menu.open(selected);
                 }
@@ -175,7 +177,7 @@ impl Composer {
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 match event.keystroke.key.as_str() {
-                    "escape" => this.t3_permissions.menu.finish_close(),
+                    "escape" => this.t3_permissions.close_menu(),
                     "enter" | "space" if !busy => {
                         if let Some(index) = this.t3_permissions.menu.as_open().copied() {
                             this.set_t3_runtime_mode(MODES[index].0, cx);
@@ -263,7 +265,9 @@ impl Composer {
                 .w(px(300.0))
                 .children(rows)
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.t3_permissions.menu.finish_close();
+                    if this.t3_permissions.menu.begin_close() {
+                        popover::reap_popup(cx, |this| &mut this.t3_permissions.menu);
+                    }
                     cx.notify();
                 }));
             trigger.child(popover::anchored_menu_above(
