@@ -6885,8 +6885,11 @@ impl Transcript {
                             .child(SharedString::from(title)),
                     )
                     .child(
-                        crate::popover::btn_ghost(&theme, "Expand", "visual-expand").on_click(
-                            move |_, window, cx| {
+                        crate::popover::btn_ghost(&theme, "Expand", "visual-expand")
+                            .id(SharedString::from(format!("{row}-visual-expand")))
+                            .role(gpui::Role::Button)
+                            .aria_label("Expand interactive visual")
+                            .on_click(move |_, window, cx| {
                                 render::activate_link(
                                     expand.clone(),
                                     render::LinkAction::Primary,
@@ -6894,8 +6897,7 @@ impl Transcript {
                                     window,
                                     cx,
                                 )
-                            },
-                        ),
+                            }),
                     ),
             );
         if let Some((id, browser)) = &self.inline_visual

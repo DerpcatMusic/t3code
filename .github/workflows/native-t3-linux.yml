@@ -7,6 +7,7 @@ on:
       - 'native/launch-t3'
       - 'native/connect-local.py'
       - 'native/test_connect_local.py'
+      - 'native/test_webkit.py'
       - '.github/workflows/native-t3-linux.yml'
   workflow_dispatch:
     inputs:
