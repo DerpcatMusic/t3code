@@ -87,6 +87,8 @@ jobs:
         run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib wizard_ -j2
       - name: Inline visual regression
         run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib only_dedicated_t3_visual_links -j2
+      - name: Per-chat panel regression
+        run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib session_panels_ -j2
       - name: Native desktop
         run: cargo build --release --locked -p zeron --bin zeron -j2
       - name: Separate preference paths

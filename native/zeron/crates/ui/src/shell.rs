@@ -748,9 +748,10 @@ pub struct ChatPanels {
 }
 
 /// The session-scoped panel map. Keys are chat ids; the new-chat canvas uses
-/// the empty key. Not persisted — a fresh app starts with everything closed.
+/// the empty key. Not persisted; new sessions use the app's panel defaults.
 #[derive(Debug, Default)]
 pub struct SessionPanels {
+    defaults: ChatPanels,
     map: std::collections::HashMap<String, ChatPanels>,
     /// Unique surface visits, oldest first, independent of the strip order.
     right_tab_history: std::collections::HashMap<String, Vec<RightSurface>>,
@@ -758,26 +759,26 @@ pub struct SessionPanels {
 
 impl SessionPanels {
     pub fn get(&self, key: &str) -> ChatPanels {
-        self.map.get(key).copied().unwrap_or_default()
+        self.map.get(key).copied().unwrap_or(self.defaults)
     }
 
     /// Flip the terminal flag for `key`; returns the new value.
     pub fn toggle_terminal(&mut self, key: &str) -> bool {
-        let entry = self.map.entry(key.to_string()).or_default();
+        let entry = self.map.entry(key.to_string()).or_insert(self.defaults);
         entry.terminal_open = !entry.terminal_open;
         entry.terminal_open
     }
 
     /// Flip the changes flag for `key`; returns the new value.
     pub fn toggle_changes(&mut self, key: &str) -> bool {
-        let entry = self.map.entry(key.to_string()).or_default();
+        let entry = self.map.entry(key.to_string()).or_insert(self.defaults);
         entry.changes_open = !entry.changes_open;
         entry.changes_open
     }
 
     /// Mutate `key`'s flags in place (right-pane surface bookkeeping).
     pub fn update(&mut self, key: &str, f: impl FnOnce(&mut ChatPanels)) {
-        let panel = self.map.entry(key.to_string()).or_default();
+        let panel = self.map.entry(key.to_string()).or_insert(self.defaults);
         let previous = panel.right_active;
         f(panel);
         let surface = panel.right_active;
@@ -2355,6 +2356,13 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
+        let panels = SessionPanels {
+            defaults: ChatPanels {
+                changes_open: state.read(cx).t3_mode && settings.right_pane_open,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         Self {
             state,
             sidebar_pane,
@@ -2500,7 +2508,7 @@ impl Shell {
             data_dir,
             settings_base: settings::current(cx),
             settings,
-            panels: SessionPanels::default(),
+            panels,
             active_chat: String::new(),
             last_appshot_chat: None,
             sidebar_prev_order: Vec::new(),
@@ -14622,6 +14630,23 @@ mod tests {
         assert_eq!(panels.get("a").right_active, RightSurface::Picker);
         // The new-chat canvas ("" key) is its own session, also closed.
         assert!(!panels.get("").terminal_open);
+    }
+
+    #[test]
+    fn session_panels_default_open_still_remembers_a_closed_chat() {
+        let mut panels = SessionPanels {
+            defaults: ChatPanels {
+                changes_open: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(panels.get("a").changes_open);
+        assert!(!panels.toggle_changes("a"));
+        assert!(!panels.get("a").changes_open);
+        assert!(panels.get("b").changes_open);
+        panels.update("b", |p| p.terminal_open = true);
+        assert!(panels.get("b").changes_open && panels.get("b").terminal_open);
     }
 
     #[test]
