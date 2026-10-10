@@ -2,6 +2,8 @@ name: Z3-code Linux
 
 on:
   push:
+    branches:
+      - feat/native-zeron
     paths:
       - 'native/zeron/**'
       - 'native/launch-t3'
@@ -110,6 +112,7 @@ jobs:
           cp "$NATIVE_ORT_ROOT/LICENSE" "$native_bundle/LICENSE-ONNX-Runtime"
           cp "$NATIVE_ORT_ROOT/ThirdPartyNotices.txt" "$native_bundle/ONNX-ThirdPartyNotices.txt"
           cp ../README.md "$native_bundle/README.md"
+          cp ../FEATURES.md "$native_bundle/FEATURES.md"
           printf '%s\n' "$GITHUB_SHA" > "$native_bundle/BUILD_COMMIT"
           sh -n "$native_bundle/z3-code"
           if env -u ZERON_T3_CONNECTION T3CODE_HOME="$RUNNER_TEMP/missing-native-t3-home" "$native_bundle/z3-code" --check; then
