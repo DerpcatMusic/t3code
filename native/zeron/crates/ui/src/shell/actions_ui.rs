@@ -853,7 +853,7 @@ impl Shell {
                             this.stop_t3_panel_agent(child.clone(), cx)
                         }))
                     })
-                    .child(icon(icons::STOP).size(px(12.0))),
+                    .child(icon(icons::STOP).size(px(12.0)).text_color(theme.danger)),
             );
         }
         row.into_any_element()
@@ -925,7 +925,11 @@ impl Shell {
                                 .truncate()
                                 .child(SharedString::from(host)),
                         )
-                        .child(icon(icons::ALT_ARROW_DOWN).size(px(10.0)))
+                        .child(
+                            icon(icons::ALT_ARROW_DOWN)
+                                .size(px(10.0))
+                                .text_color(theme.text_muted),
+                        )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.t3_panel.host_menu = !this.t3_panel.host_menu;
                             this.t3_panel.editor_menu = false;
@@ -941,7 +945,11 @@ impl Shell {
                                 .text_color(theme.text_muted),
                         )
                         .child("Open")
-                        .child(icon(icons::ALT_ARROW_DOWN).size(px(10.0)))
+                        .child(
+                            icon(icons::ALT_ARROW_DOWN)
+                                .size(px(10.0))
+                                .text_color(theme.text_muted),
+                        )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.t3_panel.editor_menu = !this.t3_panel.editor_menu;
                             this.t3_panel.host_menu = false;
@@ -964,7 +972,11 @@ impl Shell {
                 )
                 .child(
                     panel_control(&theme, "t3-panel-connections")
-                        .child(icon(icons::MONITOR).size(px(14.0)))
+                        .child(
+                            icon(icons::MONITOR)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
                         .child("Devices and connections")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.open_t3_settings_route(
@@ -976,7 +988,7 @@ impl Shell {
                 )
                 .child(
                     panel_control(&theme, "t3-panel-providers")
-                        .child(icon(icons::BOT).size(px(14.0)))
+                        .child(icon(icons::BOT).size(px(14.0)).text_color(theme.text_muted))
                         .child("Providers")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.open_t3_settings_route(
@@ -992,7 +1004,11 @@ impl Shell {
             card = card
                 .child(
                     panel_control(&theme, "t3-open-editor")
-                        .child(icon(icons::TERMINAL).size(px(14.0)))
+                        .child(
+                            icon(icons::TERMINAL)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
                         .child("Open in Zed")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.t3_panel.editor_menu = false;
@@ -1001,7 +1017,11 @@ impl Shell {
                 )
                 .child(
                     panel_control(&theme, "t3-project-terminal")
-                        .child(icon(icons::TERMINAL).size(px(14.0)))
+                        .child(
+                            icon(icons::TERMINAL)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
                         .child("Terminal")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.t3_panel.editor_menu = false;
@@ -1010,7 +1030,11 @@ impl Shell {
                 )
                 .child(
                     panel_control(&theme, "t3-copy-project-path")
-                        .child(icon(icons::COPY).size(px(14.0)))
+                        .child(
+                            icon(icons::COPY)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
                         .child("Copy project path")
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -1041,7 +1065,8 @@ impl Shell {
                             } else {
                                 icons::ALT_ARROW_DOWN
                             })
-                            .size(px(10.0)),
+                            .size(px(10.0))
+                            .text_color(theme.text_muted),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.t3_panel.scripts_open = !this.t3_panel.scripts_open;
@@ -1050,7 +1075,11 @@ impl Shell {
                 )
                 .child(
                     panel_control(&theme, "t3-add-script")
-                        .child(icon(icons::PLUS).size(px(13.0)))
+                        .child(
+                            icon(icons::PLUS)
+                                .size(px(13.0))
+                                .text_color(theme.text_muted),
+                        )
                         .tooltip(crate::settings::widgets::text_tooltip("Add project script"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.open_project_action_editor(None, None, cx)
@@ -1132,7 +1161,11 @@ impl Shell {
                         )
                         .child(
                             panel_control(&theme, format!("t3-script-edit-{}", edit_action.id))
-                                .child(icon(icons::SETTINGS).size(px(12.0)))
+                                .child(
+                                    icon(icons::SETTINGS)
+                                        .size(px(12.0))
+                                        .text_color(theme.text_muted),
+                                )
                                 .tooltip(crate::settings::widgets::text_tooltip(
                                     "Edit project script",
                                 ))
@@ -1215,7 +1248,11 @@ impl Shell {
             } else {
                 card = card.child(
                     panel_control(&theme, "t3-initialize-git")
-                        .child(icon(icons::GIT_BRANCH).size(px(14.0)))
+                        .child(
+                            icon(icons::GIT_BRANCH)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
                         .child("Initialize Git")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.t3_project_command("T3InitializeGit", cx)
@@ -1251,7 +1288,8 @@ impl Shell {
                             } else {
                                 icons::ALT_ARROW_DOWN
                             })
-                            .size(px(10.0)),
+                            .size(px(10.0))
+                            .text_color(theme.text_muted),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.t3_panel.lineage_open = !this.t3_panel.lineage_open;
@@ -1280,7 +1318,8 @@ impl Shell {
                                             .map(agent_provider_icon)
                                             .unwrap_or(icons::GIT_BRANCH),
                                     )
-                                    .size(px(14.0)),
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
                                 )
                                 .child(div().flex_1().min_w(px(0.0)).truncate().child(
                                     SharedString::from(
@@ -1346,7 +1385,8 @@ impl Shell {
                             } else {
                                 icons::ALT_ARROW_DOWN
                             })
-                            .size(px(10.0)),
+                            .size(px(10.0))
+                            .text_color(theme.text_muted),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.t3_panel.previous_open = !this.t3_panel.previous_open;
@@ -1398,7 +1438,11 @@ impl Shell {
             .gap(px(4.0))
             .child(
                 panel_control(&theme, format!("t3-{group}-previous"))
-                    .child(icon(icons::ALT_ARROW_LEFT).size(px(12.0)))
+                    .child(
+                        icon(icons::ALT_ARROW_LEFT)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    )
                     .tooltip(crate::settings::widgets::text_tooltip("Previous page"))
                     .when(current == 0, |el| el.cursor_default().opacity(0.35))
                     .when(current > 0, |el| {
@@ -1425,7 +1469,11 @@ impl Shell {
             )
             .child(
                 panel_control(&theme, format!("t3-{group}-next"))
-                    .child(icon(icons::ALT_ARROW_RIGHT).size(px(12.0)))
+                    .child(
+                        icon(icons::ALT_ARROW_RIGHT)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    )
                     .tooltip(crate::settings::widgets::text_tooltip("Next page"))
                     .when(range.end == total, |el| el.cursor_default().opacity(0.35))
                     .when(range.end < total, |el| {

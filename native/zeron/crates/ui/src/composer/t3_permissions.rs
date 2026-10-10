@@ -205,13 +205,21 @@ impl Composer {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(icons::icon(icons::LOCK).size(px(14.0)))
+            .child(
+                icons::icon(icons::LOCK)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
             .child(if busy {
                 "Updating…"
             } else {
                 MODES[selected].1
             })
-            .child(icons::icon(icons::ALT_ARROW_DOWN).size(px(12.0)));
+            .child(
+                icons::icon(icons::ALT_ARROW_DOWN)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            );
         let trigger = if open {
             let active = self.t3_permissions.menu.as_open().copied();
             let rows = MODES
@@ -247,11 +255,12 @@ impl Composer {
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text)
                                 .child(label)
-                                .children(
-                                    (index == selected).then(|| {
-                                        icons::icon(icons::CHECK).size(px(13.0)).ml(px(8.0))
-                                    }),
-                                ),
+                                .children((index == selected).then(|| {
+                                    icons::icon(icons::CHECK)
+                                        .size(px(13.0))
+                                        .ml(px(8.0))
+                                        .text_color(theme.accent)
+                                })),
                         )
                         .child(
                             div()
