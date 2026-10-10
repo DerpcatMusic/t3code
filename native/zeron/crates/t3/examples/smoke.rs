@@ -19,7 +19,8 @@ async fn main() -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(45), async {
         let service = zeron_t3::T3Service::connect(std::path::Path::new(&path)).await?;
         let client = memory_client(service);
-        let _: zeron_proto::EngineInfo = client.call_as(methods::ENGINE_INFO, json!({})).await?;
+        let info: zeron_proto::EngineInfo = client.call_as(methods::ENGINE_INFO, json!({})).await?;
+        ensure!(info.supports(zeron_t3::CAPABILITY), "T3 capability missing");
         let mut auth = client
             .subscribe_checked(methods::AUTH_STATUS, json!({}))
             .await?;

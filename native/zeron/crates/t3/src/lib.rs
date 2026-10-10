@@ -21,6 +21,8 @@ use zeron_doc::{SessionCommandPayload, TranscriptBaseline, TranscriptFrame, Tran
 use zeron_proto::{EngineInfo, UserInputAnswer, WorkspaceScope};
 use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, methods};
 
+pub const CAPABILITY: &str = "t3.orchestration.v2";
+
 pub struct T3Service {
     client: Arc<RwLock<Option<Arc<RpcClient>>>>,
     shell: watch::Receiver<Arc<Shell>>,
@@ -165,7 +167,7 @@ impl T3Service {
                 device_id: config.environment_id,
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
-                capabilities: vec![],
+                capabilities: vec![CAPABILITY.into()],
             },
             origin: config.origin,
             task,

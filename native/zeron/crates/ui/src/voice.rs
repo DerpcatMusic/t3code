@@ -79,6 +79,13 @@ impl VoiceController {
     /// Read whether `engine`'s device can take a call: installed and enabled
     /// in Settings → Agents. `force` re-reads a connection already read.
     pub fn check_codex(&mut self, engine: &EngineHandle, force: bool, cx: &mut Context<Self>) {
+        if engine.engine_info().supports(zeron_t3::CAPABILITY) {
+            if self.codex_ready != Some(false) {
+                self.codex_ready = Some(false);
+                cx.notify();
+            }
+            return;
+        }
         let same = self
             .codex_engine
             .as_ref()
@@ -133,6 +140,9 @@ impl VoiceController {
         voice: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if engine.engine_info().supports(zeron_t3::CAPABILITY) {
+            return;
+        }
         self.cancel(cx);
         // The call sounds as it is placed, well before the microphone opens.
         crate::sound::play_voice(true);
