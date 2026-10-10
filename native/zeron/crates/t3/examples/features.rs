@@ -90,11 +90,22 @@ async fn main() -> Result<()> {
         .await
         .context("close terminal")?;
     result.context("terminal streaming and replay")?;
-    let action_id = uuid::Uuid::new_v4().to_string();
-    let created: ProjectActionsSnapshot = client.call_as(methods::UPSERT_PROJECT_ACTION,json!({"spaceId":project,"actionId":action_id,"action":{"name":"Z3 isolated check","command":"printf 'Z3_SCRIPT_OK\\n'","icon":"test","runOnWorktreeCreate":false}})).await?;
+    let action_name = format!("Z3 isolated {}", uuid::Uuid::new_v4());
+    let created: ProjectActionsSnapshot = client.call_as(methods::UPSERT_PROJECT_ACTION,json!({"spaceId":project,"action":{"name":action_name,"command":"printf 'Z3_SCRIPT_OK\\n'","icon":"test","runOnWorktreeCreate":false}})).await.context("create project script")?;
+    let action_id = created
+        .actions
+        .iter()
+        .find(|a| a.name == action_name)
+        .context("script did not persist")?
+        .id
+        .clone();
     ensure!(
-        created.actions.iter().any(|a| a.id == action_id),
-        "script did not persist"
+        !action_id.is_empty()
+            && action_id.len() <= 24
+            && action_id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+        "generated script id violates the T3 contract"
     );
     let run: Result<ProjectActionRun, _> = client
         .call_as(

@@ -95,7 +95,7 @@ impl T3Service {
                 let action_id = params["actionId"]
                     .as_str()
                     .map(String::from)
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()[..24].to_owned());
                 let index = scripts.iter().position(|s| s["id"] == action_id);
                 if method == methods::DELETE_PROJECT_ACTION {
                     let index = index
