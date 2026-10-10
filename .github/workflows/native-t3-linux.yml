@@ -131,6 +131,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          native_latest_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/feat/native-zeron" --jq .object.sha)
+          if [ "$native_latest_sha" != "$GITHUB_SHA" ]; then
+            echo 'A newer build is queued; this tested version remains available as an artifact.'
+            exit 0
+          fi
           cd "$RUNNER_TEMP"
           sha256sum z3-code-linux-x64.tar.gz > z3-code-linux-x64.tar.gz.sha256
           gh release create "z3-code-${GITHUB_SHA:0:8}" \
