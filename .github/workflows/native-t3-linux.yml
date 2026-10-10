@@ -80,6 +80,8 @@ jobs:
         run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib user_bubbles_wrap_during_virtual_list_layout -j2
       - name: Question wizard regression
         run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib wizard_ -j2
+      - name: Inline visual regression
+        run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib only_dedicated_t3_visual_links -j2
       - name: Native desktop
         run: cargo build --release --locked -p zeron --bin zeron -j2
       - name: Separate preference paths
@@ -91,7 +93,7 @@ jobs:
           native_bundle="$RUNNER_TEMP/z3-code-linux-x64"
           mkdir -p "$native_bundle/lib"
           cp target/release/zeron "$native_bundle/zeron"
-          cp target/release/examples/smoke target/release/examples/exercise target/release/examples/sidebar "$native_bundle/"
+          cp target/release/examples/smoke target/release/examples/exercise target/release/examples/sidebar target/release/examples/features "$native_bundle/"
           cp ../launch-t3 "$native_bundle/z3-code"
           cp ../connect-local.py "$native_bundle/connect-local.py"
           chmod +x "$native_bundle/z3-code"

@@ -1,6 +1,7 @@
 //! T3 owns providers, workspaces and durable history. This crate only adapts views.
 
 mod attachments;
+mod git;
 mod projection;
 mod sidebar;
 mod transport;
@@ -43,6 +44,7 @@ pub struct T3Service {
     pub origin: String,
     attachments: attachments::Attachments,
     connection_path: PathBuf,
+    catalog: Arc<std::sync::RwLock<Vec<Value>>>,
     project_write: tokio::sync::Mutex<()>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -88,6 +90,16 @@ impl T3Service {
             .await?
             .context("T3 archive stream ended before its snapshot")?;
         shell.apply_archive(&first)?;
+        let mut configuration = client
+            .subscribe_checked("subscribeServerConfig", json!({}))
+            .await?;
+        let initial_config = tokio::time::timeout(Duration::from_secs(15), configuration.recv())
+            .await?
+            .context("T3 config stream ended")?;
+        let catalog = Arc::new(std::sync::RwLock::new(
+            rows(&initial_config["config"], "providers")?.to_vec(),
+        ));
+        let task_catalog = catalog.clone();
         let (shell_tx, shell_rx) = watch::channel(Arc::new(shell));
         let (connectivity_tx, connectivity) = watch::channel(json!({"state":"connected"}));
         let client_slot = Arc::new(RwLock::new(Some(client)));
@@ -116,6 +128,15 @@ impl T3Service {
                                 Ok(true) => { let _ = shell_tx.send(Arc::new(shell)); }
                                 Ok(false) => {},
                                 Err(_) => { tracing::warn!("invalid T3 archive projection; reconnecting"); break true; }
+                            }
+                        }
+                        next = configuration.recv() => {
+                            let Some(next) = next else {break true;};
+                            let providers = if next["type"] == "snapshot" {next["config"]["providers"].as_array()} else {next["payload"]["providers"].as_array()};
+                            if let Some(providers) = providers {
+                                if let Ok(mut catalog) = task_catalog.write() {*catalog = providers.clone();}
+                                let current = shell_tx.borrow().clone();
+                                let _ = shell_tx.send(current);
                             }
                         }
                         _ = heartbeat.tick() => {
@@ -156,11 +177,31 @@ impl T3Service {
                             .await?;
                         let first = archives.recv().await.context("T3 archive stream ended")?;
                         shell.apply_archive(&first)?;
-                        Ok::<_, anyhow::Error>((next, rx, archives, shell))
+                        let mut configuration = next
+                            .client
+                            .subscribe_checked("subscribeServerConfig", json!({}))
+                            .await?;
+                        let initial = configuration
+                            .recv()
+                            .await
+                            .context("T3 config stream ended")?;
+                        let providers = rows(&initial["config"], "providers")?.to_vec();
+                        Ok::<_, anyhow::Error>((
+                            next,
+                            rx,
+                            archives,
+                            shell,
+                            configuration,
+                            providers,
+                        ))
                     })
                     .await;
                     match connect {
-                        Ok(Ok((next, rx, archive_rx, shell))) => {
+                        Ok(Ok((next, rx, archive_rx, shell, config_rx, providers))) => {
+                            configuration = config_rx;
+                            if let Ok(mut catalog) = task_catalog.write() {
+                                *catalog = providers;
+                            }
                             *task_slot.write().await = Some(next.client.clone());
                             let _ = shell_tx.send(Arc::new(shell));
                             let _ = connectivity_tx.send(json!({"state":"connected"}));
@@ -187,6 +228,7 @@ impl T3Service {
             attachments: attachments::Attachments::new(&config.origin)?,
             origin: config.origin,
             connection_path: path.to_owned(),
+            catalog: Arc::new(std::sync::RwLock::new(rows(&server, "providers")?.to_vec())),
             project_write: tokio::sync::Mutex::new(()),
             task,
         }))
@@ -201,14 +243,10 @@ impl T3Service {
     }
 
     async fn providers(&self) -> Result<Vec<Value>, RpcError> {
-        let config = self
-            .client()
-            .await?
-            .call("server.getConfig", json!({}))
-            .await?;
-        rows(&config, "providers")
-            .map(<[Value]>::to_vec)
-            .map_err(failed)
+        self.catalog
+            .read()
+            .map(|providers| providers.clone())
+            .map_err(|_| failed("Provider catalog unavailable"))
     }
 
     async fn dispatch(&self, mut command: Value) -> Result<Value, RpcError> {
@@ -297,9 +335,36 @@ impl T3Service {
                 config["model"].as_str(),
             )?;
             let mut selection = selection;
+            let mut options = option_map(&config["modelOptions"]).map_err(failed)?;
+            if let Some(model) = providers
+                .iter()
+                .find(|p| p["instanceId"] == selection["instanceId"])
+                .and_then(|p| {
+                    p["models"]
+                        .as_array()?
+                        .iter()
+                        .find(|m| m["slug"] == selection["model"])
+                })
+            {
+                for descriptor in model["capabilities"]["optionDescriptors"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|d| d["type"] == "boolean")
+                {
+                    if let Some(value) =
+                        descriptor["id"].as_str().and_then(|id| options.get_mut(id))
+                    {
+                        if value == "true" {
+                            *value = json!(true);
+                        } else if value == "false" {
+                            *value = json!(false);
+                        }
+                    }
+                }
+            }
             selection["options"] = json!(
-                option_map(&config["modelOptions"])
-                    .map_err(failed)?
+                options
                     .into_iter()
                     .map(|(id, value)| json!({"id":id,"value":value}))
                     .collect::<Vec<_>>()
@@ -840,8 +905,12 @@ impl RpcService for T3Service {
                 Ok(serde_json::to_value(s.sessions(&environment)?)?)
             })),
             methods::WATCH_CHATS => {
-                let providers = self.providers().await?;
+                self.providers().await?;
+                let catalog = self.catalog.clone();
                 Ok(watch_values(self.shell.clone(), move |s| {
+                    let providers = catalog
+                        .read()
+                        .map_err(|_| anyhow::anyhow!("Provider catalog unavailable"))?;
                     let metadata: std::collections::HashMap<_, _> = s
                         .all_threads()
                         .map(|thread| {
@@ -882,7 +951,14 @@ impl RpcService for T3Service {
                 let mut descriptors = Vec::new();
                 for provider in providers {
                     if let Some(id) = harness(provider["driver"].as_str().unwrap_or("")) {
-                        if descriptors.iter().any(|v: &Value| v["id"] == id) {
+                        if let Some(existing) =
+                            descriptors.iter_mut().find(|v: &&mut Value| v["id"] == id)
+                        {
+                            existing["enabled"] =
+                                json!(existing["enabled"] == true || provider["enabled"] == true);
+                            existing["installed"] = json!(
+                                existing["installed"] == true || provider["installed"] == true
+                            );
                             continue;
                         }
                         descriptors.push(json!({"id":id,"name":provider["displayName"].as_str().unwrap_or(id),
@@ -1168,6 +1244,10 @@ impl RpcService for T3Service {
             | methods::SUBSCRIBE_TERMINAL
             | "T3OpenInEditor"
             | "T3InitializeGit" => self.workspace(method, params).await,
+            methods::WATCH_CHECKOUT_DIFFS
+            | methods::GET_CHECKOUT_DIFF
+            | methods::GET_CHECKOUT_FILE_DIFF_TEXT
+            | methods::LIST_BRANCHES => self.git(method, params).await,
             // ponytail: add remaining native controls with their T3 RPC mapping; never fall through to Zeron's engine.
             _ => Err(RpcError::UnknownMethod(format!(
                 "{method} (not yet migrated to T3)"

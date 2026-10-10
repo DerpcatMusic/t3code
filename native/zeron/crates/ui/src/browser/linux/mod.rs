@@ -238,6 +238,10 @@ impl NativePage {
     pub fn load(&self, url: &str) -> Result<(), String> {
         self.worker.send(self.id, json!({"cmd":"load","url":url}))
     }
+    pub fn load_document(&self, url: &str) -> Result<(), String> {
+        self.worker
+            .send(self.id, json!({"cmd":"load-document","url":url}))
+    }
     pub fn reload(&self) {
         self.command(json!({"cmd":"reload"}));
     }

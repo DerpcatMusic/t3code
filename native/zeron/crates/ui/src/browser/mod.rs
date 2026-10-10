@@ -84,6 +84,7 @@ pub struct BrowserSurface {
     address_edited: bool,
     validation: Option<String>,
     remote: bool,
+    document: bool,
     previews: zeron_proto::PreviewSnapshot,
     previews_loading: bool,
     previews_task: Option<gpui::Task<()>>,
@@ -162,6 +163,7 @@ impl BrowserSurface {
             address_edited: false,
             validation: None,
             remote,
+            document: false,
             previews: zeron_proto::PreviewSnapshot::default(),
             previews_loading: true,
             previews_task: None,
@@ -189,6 +191,10 @@ impl BrowserSurface {
     pub fn title(&self) -> gpui::SharedString {
         self.page.label().into()
     }
+    pub fn set_document(&mut self) {
+        self.document = true;
+    }
+
     pub fn set_remote(&mut self, remote: bool) {
         self.remote = remote;
     }
@@ -339,6 +345,13 @@ impl BrowserSurface {
                 self.favicon_task = None;
             }
             let result = if let Some(native) = &self.native {
+                #[cfg(target_os = "linux")]
+                if self.document {
+                    native.load_document(&url)
+                } else {
+                    native.load(&url)
+                }
+                #[cfg(target_os = "macos")]
                 native.load(&url)
             } else {
                 native::NativePage::new(window, &self.context.data, self.native_tx.clone())
@@ -346,7 +359,17 @@ impl BrowserSurface {
                         native.present(self.presentation);
                         self.native = Some(native);
                     })
-                    .and_then(|_| self.native.as_ref().unwrap().load(&url))
+                    .and_then(|_| {
+                        let native = self.native.as_ref().unwrap();
+                        #[cfg(target_os = "linux")]
+                        if self.document {
+                            native.load_document(&url)
+                        } else {
+                            native.load(&url)
+                        }
+                        #[cfg(target_os = "macos")]
+                        native.load(&url)
+                    })
             };
             self.page.loading = result.is_ok();
             if let Err(error) = result {

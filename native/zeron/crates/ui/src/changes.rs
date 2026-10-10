@@ -1645,6 +1645,7 @@ pub struct Changes {
     /// carries the TARGET device's checkouts, so a selection change onto a
     /// chat hosted elsewhere tears the watch down and re-subscribes.
     watch_target: Option<String>,
+    watch_chat: Option<String>,
     watch_task: Option<Task<()>>,
     parsed: Option<ParsedDiff>,
     parse_task: Option<Task<()>>,
@@ -1750,6 +1751,7 @@ impl Changes {
             started: false,
             error: None,
             watch_target: None,
+            watch_chat: None,
             watch_task: None,
             parsed: None,
             parse_task: None,
@@ -1841,7 +1843,14 @@ impl Changes {
     /// content stays visible under an error banner meanwhile.
     pub fn ensure_watch(&mut self, cx: &mut Context<Self>) {
         let target = self.desired_target(cx);
-        if self.started && self.watch_target == target {
+        let t3_chat = std::env::var_os("ZERON_T3_CONNECTION")
+            .is_some()
+            .then(|| self.state.read(cx).selected_chat_row().cloned())
+            .flatten();
+        let binding = t3_chat
+            .as_ref()
+            .map(|chat| format!("{}:{}", chat.id, chat.cwd.as_deref().unwrap_or("")));
+        if self.started && self.watch_target == target && self.watch_chat == binding {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -1856,12 +1865,14 @@ impl Changes {
         }
         self.started = true;
         self.watch_target = target.clone();
-        self.watch_task = Some(Self::spawn_watch(engine, target, cx));
+        self.watch_chat = binding;
+        self.watch_task = Some(Self::spawn_watch(engine, target, t3_chat, cx));
     }
 
     fn spawn_watch(
         engine: EngineHandle,
         target: Option<String>,
+        t3_chat: Option<zeron_proto::Chat>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx| {
@@ -1872,6 +1883,10 @@ impl Changes {
                         "targetDeviceId".into(),
                         serde_json::Value::String(target.clone()),
                     );
+                }
+                if let Some(chat) = &t3_chat {
+                    params.insert("chatId".into(), serde_json::json!(chat.id));
+                    params.insert("cwd".into(), serde_json::json!(chat.cwd));
                 }
                 let subscribed = engine
                     .client()

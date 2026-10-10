@@ -16,7 +16,7 @@ typedef struct {
     guint id;
     GtkWidget *window;
     WebKitWebView *web;
-    gboolean visible, dirty;
+    gboolean visible, dirty, document;
     gchar *error;
     guint width, height;
     double scale;
@@ -198,7 +198,7 @@ static gboolean policy(WebKitWebView *web, WebKitPolicyDecision *decision,
         WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(
             WEBKIT_NAVIGATION_POLICY_DECISION(decision));
         const char *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
-        if (!allowed(uri)) {
+        if (!allowed(uri) && !(p->document && !strcmp(uri, "about:blank"))) {
             webkit_policy_decision_ignore(decision);
             return TRUE;
         }
@@ -525,12 +525,24 @@ static void command(JsonObject *o) {
         g_hash_table_remove(pages, GUINT_TO_POINTER(id));
         return;
     }
-    if (!strcmp(cmd, "load-session")) {
+    if (!strcmp(cmd, "load-document")) {
+        const char *url = string(o, "url");
+        if (allowed(url)) {
+            p->document = TRUE;
+            char *escaped = g_markup_escape_text(url, -1);
+            char *html = g_strdup_printf("<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'><style>html,body,iframe{margin:0;width:100%%;height:100%%;border:0;overflow:hidden;background:transparent}</style><iframe sandbox='allow-scripts' src='%s'></iframe>", escaped);
+            webkit_web_view_load_html(p->web, html, NULL);
+            g_free(html); g_free(escaped);
+        }
+    } else if (!strcmp(cmd, "load-session")) {
+        p->document = FALSE;
         load_session(p, o);
     } else if (!strcmp(cmd, "load")) {
         const char *url = string(o, "url");
-        if (allowed(url))
+        if (allowed(url)) {
+            p->document = FALSE;
             webkit_web_view_load_uri(p->web, url);
+        }
     } else if (!strcmp(cmd, "dismiss-menu")) {
         if (p->options) {
             webkit_option_menu_close(p->options);

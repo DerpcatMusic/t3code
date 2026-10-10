@@ -3551,6 +3551,19 @@ impl Shell {
         if !from_main && !self.side_chat_open_here(&source, cx) {
             return LinkOutcome::Rejected;
         }
+        if let Some(attachment) = zeron_t3::parse_attachment_path(&activation.target.original) {
+            let Some(engine) = self.state.read(cx).engine().cloned() else {
+                return LinkOutcome::Rejected;
+            };
+            cx.spawn_in(window,async move |this,cx| {
+                let result = engine.client().call("T3AssetUrl",serde_json::json!({"resource":{"_tag":"attachment","attachmentId":attachment["id"],"fileName":attachment["name"],"mimeType":attachment["mimeType"],"disposition":"attachment"}})).await;
+                this.update_in(cx,|shell,_,cx| match result {
+                    Ok(value) => if let Some(url) = value["url"].as_str() {cx.open_url(url);},
+                    Err(error) => {shell.sidebar_notice = Some(format!("Download failed: {error}").into());cx.notify();}
+                }).ok();
+            }).detach();
+            return LinkOutcome::Internal;
+        }
         if let Some(encoded) = activation.target.original.strip_prefix("t3-visual:") {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
             if std::env::var_os("ZERON_T3_CONNECTION").is_none() || encoded.len() > 4096 {
@@ -3583,7 +3596,17 @@ impl Shell {
                         Ok(value) => {
                             if let Some(url) = value["url"].as_str() {
                                 shell.set_surfaces_open(true, cx);
-                                shell.add_browser_surface(Some(url.into()), window, cx);
+                                let shared = std::mem::take(&mut shell.browser_context);
+                                shell.add_browser_surface(None, window, cx);
+                                shell.browser_context = shared;
+                                if let RightSurface::Browser(id) = shell.resolved_right_active(cx)
+                                    && let Some(browser) = shell.browsers.get(&id)
+                                {
+                                    browser.update(cx, |browser, cx| {
+                                        browser.set_document();
+                                        browser.navigate(url, window, cx);
+                                    });
+                                }
                             }
                         }
                         Err(error) => {

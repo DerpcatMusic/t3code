@@ -3080,6 +3080,9 @@ impl SavedViewportCache {
 
 pub struct Transcript {
     state: Entity<AppState>,
+    inline_visual: Option<(String, Entity<crate::browser::BrowserSurface>)>,
+    visual_loading: Option<(String, Task<()>)>,
+    visual_error: Option<(String, String)>,
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
@@ -3499,6 +3502,9 @@ impl Transcript {
         let pinned = follow;
         let mut this = Self {
             state,
+            inline_visual: None,
+            visual_loading: None,
+            visual_error: None,
             list,
             rows: Vec::new(),
             last_source: None,
@@ -3787,6 +3793,11 @@ impl Transcript {
     }
 
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
+        if let Some((_, browser)) = &self.inline_visual {
+            browser.update(cx, |browser, cx| {
+                browser.set_presentation(crate::browser::model::Presentation::Hidden, cx)
+            });
+        }
         // Cancel synchronously, before a queued animation frame can undo the
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
@@ -4626,6 +4637,11 @@ impl Transcript {
             self.veil_attach_pending = true;
         }
         if attached {
+            self.visual_loading = None;
+            self.visual_error = None;
+            if let Some((_, browser)) = self.inline_visual.take() {
+                browser.update(cx, |browser, cx| browser.close(cx));
+            }
             // Read the incoming snapshot before inserting the outgoing one:
             // a full bounded cache may evict its oldest entry, which can be
             // exactly the chat the user is reopening.
@@ -6272,7 +6288,25 @@ impl Transcript {
             .pb(px(6.0));
         for (aix, att) in atts.iter().enumerate() {
             if !crate::attachments::is_image_path(&att.path) {
-                strip = strip.child(user_file_pill(&att.name, Theme::of(cx)));
+                let target = render::LinkTarget::new(&att.name, &att.path);
+                let link = self.link_ui(cx);
+                strip = strip.child(
+                    div()
+                        .id(SharedString::from(format!("{row_id}-file-{aix}")))
+                        .cursor_pointer()
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Download {}", att.name))
+                        .child(user_file_pill(&att.name, Theme::of(cx)))
+                        .on_click(move |_, window, cx| {
+                            render::activate_link(
+                                target.clone(),
+                                render::LinkAction::Primary,
+                                link.as_ref(),
+                                window,
+                                cx,
+                            )
+                        }),
+                );
                 continue;
             }
             let state = self.attachment_state(&device_ids, &att.path, None, cx);
@@ -6723,6 +6757,198 @@ impl Transcript {
         )
     }
 
+    fn load_t3_visual(
+        &mut self,
+        key: String,
+        target: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let Some(encoded) = target
+            .strip_prefix("t3-visual:")
+            .filter(|s| s.len() <= 4096)
+        else {
+            return;
+        };
+        let resource = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let Some(resource) = resource.filter(|r| {
+            r["_tag"] == "attachment"
+                && r["mimeType"] == "text/html"
+                && r["disposition"] == "inline"
+        }) else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let owner = self.chat_id.clone();
+        let loading_key = key.clone();
+        self.visual_error = None;
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = engine
+                .client()
+                .call("T3AssetUrl", serde_json::json!({"resource":resource}))
+                .await;
+            this.update_in(cx, |transcript, window, cx| {
+                if transcript.chat_id != owner
+                    || !transcript
+                        .visual_loading
+                        .as_ref()
+                        .is_some_and(|(id, _)| id == &key)
+                {
+                    return;
+                }
+                transcript.visual_loading = None;
+                match result {
+                    Ok(value) => {
+                        if let Some(url) = value["url"].as_str() {
+                            if let Some((_, browser)) = transcript.inline_visual.take() {
+                                browser.update(cx, |browser, cx| browser.close(cx));
+                            }
+                            // A tool-authored page has its own cookie store and a sandboxed iframe.
+                            let browser = cx.new(|cx| {
+                                crate::browser::BrowserSurface::new(
+                                    crate::browser::BrowserContext::default(),
+                                    false,
+                                    window,
+                                    cx,
+                                )
+                            });
+                            browser.update(cx, |browser, cx| {
+                                browser.set_document();
+                                browser.set_presentation(
+                                    crate::browser::model::Presentation::Live,
+                                    cx,
+                                );
+                                browser.navigate(url, window, cx);
+                            });
+                            transcript.inline_visual = Some((key, browser));
+                        }
+                    }
+                    Err(error) => {
+                        transcript.visual_error =
+                            Some((key, format!("Visual could not open: {error}")))
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.visual_loading = Some((loading_key, task));
+        cx.notify();
+    }
+
+    fn render_t3_visual(
+        &mut self,
+        row: &SharedString,
+        target: String,
+        title: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let key = row.to_string();
+        let link = self.link_ui(cx);
+        let expand = render::LinkTarget::new(&title, &target);
+        let loading = self
+            .visual_loading
+            .as_ref()
+            .is_some_and(|(id, _)| id == &key);
+        let mut card = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme.border)
+            .overflow_hidden()
+            .child(
+                div()
+                    .h(px(40.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .bg(theme.surface_card)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(title)),
+                    )
+                    .child(
+                        crate::popover::btn_ghost(&theme, "Expand", "visual-expand").on_click(
+                            move |_, window, cx| {
+                                render::activate_link(
+                                    expand.clone(),
+                                    render::LinkAction::Primary,
+                                    link.as_ref(),
+                                    window,
+                                    cx,
+                                )
+                            },
+                        ),
+                    ),
+            );
+        if let Some((id, browser)) = &self.inline_visual
+            && id == &key
+        {
+            browser.update(cx, |browser, cx| {
+                browser.set_presentation(crate::browser::model::Presentation::Live, cx)
+            });
+            card = card.child(div().h(px(420.0)).child(browser.clone()));
+        } else {
+            let error = self
+                .visual_error
+                .as_ref()
+                .filter(|(id, _)| id == &key)
+                .map(|(_, message)| message.clone());
+            card = card.child(
+                div()
+                    .h(px(120.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(10.0))
+                    .children(error.map(|message| {
+                        div()
+                            .px(px(12.0))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.danger)
+                            .child(SharedString::from(message))
+                    }))
+                    .child(
+                        crate::popover::btn_primary(
+                            &theme,
+                            if loading {
+                                "Opening…"
+                            } else {
+                                "Open interactive visual"
+                            },
+                        )
+                        .id(SharedString::from(format!("{row}-visual-open")))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                if !loading {
+                                    this.load_t3_visual(key.clone(), target.clone(), window, cx);
+                                }
+                            },
+                        )),
+                    ),
+            );
+        }
+        card.into_any_element()
+    }
+
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
@@ -6768,7 +6994,18 @@ impl Transcript {
             .then(|| self.render_working_trailer(cx))
             .flatten();
 
+        let visual = match &row.kind {
+            RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
+                .blocks
+                .get(*block_ix)
+                .and_then(|block| t3_visual_link(&block.block)),
+            _ => None,
+        };
         let inner: AnyElement = match &row.kind {
+            _ if visual.is_some() => {
+                let (target, title) = visual.expect("visual guard");
+                self.render_t3_visual(&row.id, target, title, window, cx)
+            }
             RowKind::User {
                 text,
                 mentions,
@@ -8395,6 +8632,26 @@ impl gpui::Element for ChipOverlays {
 /// A sent message's non-image attachment: the file's icon and name on the
 /// same soft pill the transcript uses for file badges. Its bytes are never
 /// read back to the transcript, so there is no thumbnail to wait for.
+fn t3_visual_link(block: &Block) -> Option<(String, String)> {
+    let Block::Paragraph { runs } = block else {
+        return None;
+    };
+    let target = runs.first()?.style.link.as_ref()?;
+    if !target.starts_with("t3-visual:")
+        || target.len() > 4106
+        || !runs
+            .iter()
+            .all(|run| run.style.link.as_ref() == Some(target))
+    {
+        return None;
+    }
+    let title = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+    Some((
+        target.clone(),
+        title.strip_prefix("Open ").unwrap_or(&title).to_owned(),
+    ))
+}
+
 fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
     let name = crate::attachments::attachment_display_name(name);
     div()
@@ -14377,6 +14634,17 @@ mod tests {
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].id, after[0].id);
         assert_eq!(before[0].version, after[0].version);
+    }
+
+    #[test]
+    fn only_dedicated_t3_visual_links_become_interactive_cards() {
+        let tree = crate::markdown::parse_full("[Open Chart](t3-visual:reference)");
+        assert_eq!(
+            t3_visual_link(&tree.blocks[0].block),
+            Some(("t3-visual:reference".into(), "Chart".into()))
+        );
+        let tree = crate::markdown::parse_full("Text [Open Chart](t3-visual:reference)");
+        assert!(t3_visual_link(&tree.blocks[0].block).is_none());
     }
 
     #[test]
