@@ -34,8 +34,12 @@ async fn main() -> Result<()> {
     let project = chat.space_id.as_deref().context("test project missing")?;
     let _: ProjectActionsSnapshot = client
         .call_as(methods::LIST_PROJECT_ACTIONS, json!({"spaceId":project}))
-        .await?;
-    let bootstrap = client.call("T3BrowserBootstrap", json!({})).await?;
+        .await
+        .context("list project scripts")?;
+    let bootstrap = client
+        .call("T3BrowserBootstrap", json!({}))
+        .await
+        .context("authenticated settings")?;
     ensure!(
         bootstrap["origin"] == config["origin"]
             && bootstrap["accessToken"]
@@ -47,7 +51,7 @@ async fn main() -> Result<()> {
     for (name,bytes) in [("z3-check.txt",b"Z3_ATTACHMENT_OK".to_vec()),("z3-check.png",STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWZkAAAAASUVORK5CYII=")?)] {
         let upload = uuid::Uuid::new_v4().to_string();
         client.call(methods::UPLOAD_CHUNK,json!({"uploadId":upload,"seq":0,"data":STANDARD.encode(&bytes)})).await?;
-        let committed = client.call(methods::UPLOAD_COMMIT,json!({"uploadId":upload,"fileName":name})).await?;
+        let committed = client.call(methods::UPLOAD_COMMIT,json!({"uploadId":upload,"fileName":name})).await.context("commit attachment")?;
         let path = committed["path"].as_str().context("attachment reference missing")?;
         let metadata = zeron_t3::parse_attachment_path(path).context("invalid attachment reference")?;
         let read = client.call(methods::READ_ATTACHMENT_CHUNK,json!({"path":path,"offset":0})).await?;
@@ -84,7 +88,7 @@ async fn main() -> Result<()> {
     client
         .call(methods::CLOSE_TERMINAL, json!({"terminalId":terminal.id}))
         .await?;
-    result?;
+    result.context("terminal streaming and replay")?;
     let action_id = uuid::Uuid::new_v4().to_string();
     let created: ProjectActionsSnapshot = client.call_as(methods::UPSERT_PROJECT_ACTION,json!({"spaceId":project,"actionId":action_id,"action":{"name":"Z3 isolated check","command":"printf 'Z3_SCRIPT_OK\\n'","icon":"test","runOnWorktreeCreate":false}})).await?;
     ensure!(

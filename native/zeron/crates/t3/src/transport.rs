@@ -77,6 +77,34 @@ impl ConnectionConfig {
         )
     }
 
+    pub async fn projects(&self, mutation: Option<Value>) -> Result<Value> {
+        let session = self.browser_bootstrap().await?;
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(15))
+            .build()?;
+        let base = self.base_url()?;
+        let request = match mutation {
+            Some(body) => http.post(base.join("api/projects/mutate")?).json(&body),
+            None => http.get(base.join("api/projects")?),
+        };
+        let response = request
+            .bearer_auth(
+                session["accessToken"]
+                    .as_str()
+                    .context("T3 authentication missing")?,
+            )
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("T3 project request failed"))?;
+        ensure!(
+            response.status().is_success(),
+            "T3 project request rejected (HTTP {})",
+            response.status().as_u16()
+        );
+        response.json().await.context("Invalid T3 project response")
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let config: Self = serde_json::from_slice(&std::fs::read(path)?)?;
         config.base_url()?;

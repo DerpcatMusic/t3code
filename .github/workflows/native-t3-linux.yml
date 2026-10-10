@@ -10,6 +10,7 @@ on:
       - 'native/connect-local.py'
       - 'native/test_connect_local.py'
       - 'native/test_webkit.py'
+      - 'native/test_contracts.py'
       - '.github/workflows/native-t3-linux.yml'
   workflow_dispatch:
     inputs:
@@ -52,6 +53,8 @@ jobs:
 
       - name: Local connection tests
         run: python3 -m unittest discover -s .. -p test_connect_local.py -v
+      - name: Current T3 API contract
+        run: python3 ../test_contracts.py -v
       - name: Linux desktop dependencies
         run: |
           sudo apt-get update -qq

@@ -50,7 +50,9 @@ impl T3Service {
                 let _write = self.project_write.lock().await;
                 let project_id = text(&params, "spaceId").map_err(failed)?;
                 // Read the authoritative project immediately before changing its script list.
-                let projects = client.call("projects.list", json!({})).await?;
+                let connection =
+                    transport::ConnectionConfig::load(&self.connection_path).map_err(failed)?;
+                let projects = connection.projects(None).await.map_err(failed)?;
                 let projects = projects
                     .as_array()
                     .or_else(|| projects["projects"].as_array())
@@ -113,7 +115,7 @@ impl T3Service {
                         scripts.push(action);
                     }
                 }
-                client.call("projects.mutate",json!({"type":"project.update","commandId":uuid::Uuid::new_v4(),"projectId":project_id,"scripts":scripts})).await?;
+                connection.projects(Some(json!({"type":"project.update","commandId":uuid::Uuid::new_v4(),"projectId":project_id,"scripts":scripts}))).await.map_err(failed)?;
                 let mut project = project.clone();
                 project["scripts"] = json!(scripts);
                 project_snapshot(&project).map(RpcReply::Value)

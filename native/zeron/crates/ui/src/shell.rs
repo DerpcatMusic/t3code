@@ -2358,7 +2358,8 @@ impl Shell {
         });
         let panels = SessionPanels {
             defaults: ChatPanels {
-                changes_open: state.read(cx).t3_mode && settings.right_pane_open,
+                changes_open: std::env::var_os("ZERON_T3_CONNECTION").is_some()
+                    && settings.right_pane_open,
                 ..Default::default()
             },
             ..Default::default()
