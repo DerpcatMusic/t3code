@@ -525,7 +525,9 @@ static void command(JsonObject *o) {
         g_hash_table_remove(pages, GUINT_TO_POINTER(id));
         return;
     }
-    if (!strcmp(cmd, "load-document")) {
+    if (!strcmp(cmd, "appearance")) {
+        g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", json_object_get_boolean_member(o, "dark"), NULL);
+    } else if (!strcmp(cmd, "load-document")) {
         const char *url = string(o, "url");
         if (allowed(url)) {
             p->document = TRUE;

@@ -356,6 +356,8 @@ impl BrowserSurface {
             } else {
                 native::NativePage::new(window, &self.context.data, self.native_tx.clone())
                     .map(|mut native| {
+                        #[cfg(target_os = "linux")]
+                        native.command(serde_json::json!({"cmd":"appearance","dark":crate::theme::Theme::of(cx).appearance.is_dark()}));
                         native.present(self.presentation);
                         self.native = Some(native);
                     })

@@ -36,8 +36,10 @@ def wait_for(script,predicate):
     raise AssertionError('Native browser did not reach the expected state')
 try:
     send('create');send('resize',width=500,height=300,scale=1);send('visible',value=1)
+    send('appearance',dark=True)
     send('load-document',url=origin+'/visual')
     wait_for("Boolean(document.querySelector('iframe'))",bool)
+    assert wait_for("matchMedia('(prefers-color-scheme: dark)').matches",lambda value:value is True) is True
     evaluate("window.z3Messages=[];addEventListener('message',e=>z3Messages.push(e.data));true")
     # Reload the frame after attaching the test-only parent listener.
     evaluate("document.querySelector('iframe').src="+json.dumps(origin+'/visual?test=1')+";true")
