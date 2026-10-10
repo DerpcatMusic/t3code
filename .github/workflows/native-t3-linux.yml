@@ -59,6 +59,8 @@ jobs:
           cache-workspace-crates: true
       - name: Adapter tests
         run: cargo test --release --locked -p zeron-t3 --lib -j2
+      - name: User bubble layout regression
+        run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib user_bubbles_wrap_during_virtual_list_layout -j2
       - name: Native desktop
         run: cargo build --release --locked -p zeron --bin zeron -j2
       - name: Separate preference paths

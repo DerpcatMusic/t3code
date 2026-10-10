@@ -6824,9 +6824,7 @@ impl Transcript {
                         div().w_full().flex().justify_end().child(
                             div()
                                 .min_w_0()
-                                .max_w(px(self.content_width.min(
-                                    f32::from(self.list.viewport_bounds().size.width).max(1.0),
-                                ) * 0.8))
+                                .max_w(gpui::relative(0.8))
                                 .bg(crate::theme::user_bubble_bg())
                                 .rounded(px(Theme::BUBBLE_RADIUS))
                                 .px(px(16.0))
@@ -12392,6 +12390,39 @@ mod tests {
                 let _ = window.draw(cx);
             })
             .unwrap();
+        }
+
+        #[test]
+        fn user_bubbles_wrap_during_virtual_list_layout() {
+            with_window(|transcript, window, cx| {
+                let dir = tempfile::tempdir().unwrap();
+                crate::settings::init(Default::default(), dir.path(), cx);
+                let mut entry = prompt("prompt");
+                entry.parts = vec![text_part(
+                    "text",
+                    &"A long user prompt must wrap within its reading column. ".repeat(8),
+                )];
+                transcript.update(cx, |this, cx| {
+                    feed(this, vec![entry], cx);
+                    this.rail_enabled = false;
+                    this.pinned = false;
+                    this.list.scroll_to(ListOffset {
+                        item_ix: 0,
+                        offset_in_item: px(0.0),
+                    });
+                });
+                crate::settings::set_transcript_width(560.0, cx);
+                draw(window, cx);
+                draw(window, cx);
+                let row = transcript.read(cx).rows[0].id.clone();
+                let narrow = transcript.read(cx).user_heights[&row].get();
+                crate::settings::set_transcript_width(1200.0, cx);
+                draw(window, cx);
+                draw(window, cx);
+                let wide = transcript.read(cx).user_heights[&row].get();
+                assert!(narrow > 0.0);
+                assert!(wide < narrow, "user bubble must reflow: {wide} vs {narrow}");
+            });
         }
 
         #[test]
