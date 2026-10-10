@@ -56,8 +56,12 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcb1-dev libx11-xcb-dev \
             libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev xvfb
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Embedded browser interaction and cookie isolation
+        run: |
+          cc crates/ui/src/browser/linux/helper.c -o "$RUNNER_TEMP/z3-webkit-check" $(pkg-config --cflags --libs gtk+-3.0 webkit2gtk-4.1 json-glib-1.0)
+          xvfb-run -a python3 ../test_webkit.py "$RUNNER_TEMP/z3-webkit-check"
       - name: ONNX Runtime
         run: |
           curl --fail --location --retry 3 \

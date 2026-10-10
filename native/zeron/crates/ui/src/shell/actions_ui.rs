@@ -568,7 +568,9 @@ impl Shell {
             this.update_in(cx, |shell, window, cx| match result {
                 Ok(session) => {
                     shell.set_surfaces_open(true, cx);
+                    let shared = std::mem::take(&mut shell.browser_context);
                     shell.add_browser_surface(None, window, cx);
+                    shell.browser_context = shared;
                     if let RightSurface::Browser(id) = shell.resolved_right_active(cx) {
                         #[cfg(target_os = "linux")]
                         if let Some(browser) = shell.browsers.get(&id) {
