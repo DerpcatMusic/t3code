@@ -260,14 +260,29 @@ pub struct ClientFrame {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerFrame {
     pub id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_value"
+    )]
     pub ok: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub err: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_value"
+    )]
     pub item: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub done: bool,
+}
+
+fn present_value<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    // A JSON null is a response; only an absent field means no response.
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// What a service returns for one invocation.
@@ -373,6 +388,9 @@ mod tests {
         ) -> Result<RpcReply, RpcError> {
             match method {
                 "Echo" => Ok(RpcReply::Value(params)),
+                "NullStream" => Ok(RpcReply::Stream(
+                    futures::stream::once(async { serde_json::Value::Null }).boxed(),
+                )),
                 "Count" => {
                     let n = params.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
                     Ok(RpcReply::Stream(
@@ -384,6 +402,28 @@ mod tests {
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn null_rpc_responses_remain_present() {
+        let absent: ServerFrame =
+            serde_json::from_value(serde_json::json!({"id":1,"done":true})).unwrap();
+        assert!(absent.ok.is_none() && absent.item.is_none());
+        let client = memory_client(Arc::new(TestService));
+        let echoed = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.call("Echo", serde_json::Value::Null),
+        )
+        .await
+        .expect("null response was lost")
+        .unwrap();
+        assert_eq!(echoed, serde_json::Value::Null);
+        let mut items = client
+            .subscribe_checked("NullStream", serde_json::Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(items.recv().await, Some(serde_json::Value::Null));
+        assert_eq!(items.recv().await, None);
     }
 
     #[tokio::test]

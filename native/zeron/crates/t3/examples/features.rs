@@ -87,7 +87,8 @@ async fn main() -> Result<()> {
     }.await;
     client
         .call(methods::CLOSE_TERMINAL, json!({"terminalId":terminal.id}))
-        .await?;
+        .await
+        .context("close terminal")?;
     result.context("terminal streaming and replay")?;
     let action_id = uuid::Uuid::new_v4().to_string();
     let created: ProjectActionsSnapshot = client.call_as(methods::UPSERT_PROJECT_ACTION,json!({"spaceId":project,"actionId":action_id,"action":{"name":"Z3 isolated check","command":"printf 'Z3_SCRIPT_OK\\n'","icon":"test","runOnWorktreeCreate":false}})).await?;
