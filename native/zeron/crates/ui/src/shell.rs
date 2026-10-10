@@ -8738,11 +8738,6 @@ impl Shell {
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.sidebar_scroll)
-                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                        if !this.state.read(cx).t3_sidebar.is_empty() {
-                            cx.notify();
-                        }
-                    }))
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
                             if let Some(transfer) = this.sidebar_session_transfer.as_mut() {

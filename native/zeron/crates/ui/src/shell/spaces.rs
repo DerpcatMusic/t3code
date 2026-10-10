@@ -5054,15 +5054,6 @@ impl Shell {
         let mut slot = 0usize;
         let mut rendered = Vec::new();
         let mut moving_row = None;
-        let windowed = !self.state.read(cx).t3_sidebar.is_empty()
-            && self.settings.sidebar_organization == SidebarOrganization::ByStatus
-            && custom_sections.is_empty()
-            && self.sidebar_session_transfer.is_none()
-            && self.sidebar_session_return.is_none()
-            && self.pinned_session_drag.is_none();
-        let viewport_top = -f32::from(self.sidebar_scroll.offset().y);
-        let viewport_height = f32::from(self.sidebar_scroll.bounds().size.height).max(600.0);
-        let mut content_y = SIDEBAR_LIST_PAD_TOP;
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
             let drag_group = if pinned_group {
@@ -5082,21 +5073,6 @@ impl Shell {
             let header_icon_chat = (project_group && self.settings.sidebar_show_project_icon)
                 .then(|| rows.first().map(|row| row.chat.id.clone()))
                 .flatten();
-            let collapsed = group.as_ref().is_some_and(|(key, _)| {
-                self.sidebar_collapsed_groups
-                    .contains(&self.sidebar_group_collapse_key(key))
-            });
-            let group_top = content_y;
-            content_y += if pinned_group {
-                SIDEBAR_DISCLOSURE_HEADER_HEIGHT + SIDEBAR_DISCLOSURE_BODY_INSET
-            } else if group.is_some() {
-                SIDEBAR_DISCLOSURE_SECTION_HEIGHT + SIDEBAR_DISCLOSURE_BODY_INSET
-            } else {
-                0.0
-            };
-            let actual_row_count = rows.len();
-            let mut spacer_height = 0.0;
-            let mut spacer_start = 0;
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
                 let ActiveChatRow {
@@ -5130,33 +5106,6 @@ impl Shell {
                     branch.is_some(),
                     change_request.is_some(),
                 );
-                let visible = !windowed
-                    || group.is_none()
-                    || is_selected
-                    || self
-                        .rename_input_for(&chat.id, ChatRenameSurface::Sidebar)
-                        .is_some()
-                    || (!collapsed
-                        && content_y + height >= viewport_top - 120.0
-                        && content_y <= viewport_top + viewport_height + 120.0);
-                content_y += height + SIDEBAR_LIST_GAP;
-                if !visible {
-                    if spacer_height == 0.0 {
-                        spacer_start = group_index;
-                    }
-                    spacer_height += height + SIDEBAR_LIST_GAP;
-                    slot += 1;
-                    continue;
-                }
-                if spacer_height > 0.0 {
-                    let height = spacer_height - SIDEBAR_LIST_GAP;
-                    rendered_rows.push((
-                        format!("spacer:{drag_group}:{spacer_start}"),
-                        height,
-                        div().flex_none().h(px(height)).into_any_element(),
-                    ));
-                    spacer_height = 0.0;
-                }
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = visible_slots.get(&chat.id).copied();
@@ -5287,18 +5236,6 @@ impl Shell {
                 rendered_rows.push((format!("c:{}", chat.id), slot_height, element));
             }
 
-            if spacer_height > 0.0 {
-                let height = spacer_height - SIDEBAR_LIST_GAP;
-                rendered_rows.push((
-                    format!("spacer:{drag_group}:{spacer_start}"),
-                    height,
-                    div().flex_none().h(px(height)).into_any_element(),
-                ));
-            }
-            if collapsed {
-                content_y = group_top + SIDEBAR_DISCLOSURE_SECTION_HEIGHT;
-            }
-
             let Some((key, label)) = group else {
                 rendered.extend(rendered_rows);
                 if !pinned_group {
@@ -5360,7 +5297,7 @@ impl Shell {
             let visible_label: SharedString = if collapsed
                 || self.settings.sidebar_organization == SidebarOrganization::ByStatus
             {
-                format!("{label} ({actual_row_count})").into()
+                format!("{label} ({row_count})").into()
             } else {
                 label.into()
             };
