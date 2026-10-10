@@ -8701,8 +8701,20 @@ impl Shell {
                 .px(px(Theme::SPACE_SM))
                 .pb(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from("No sessions yet"))
+                .text_color(theme.text_muted)
+                .child(if self.state.read(cx).t3_sidebar.is_empty() {
+                    "No sessions yet"
+                } else {
+                    match self.sidebar_t3_section {
+                        zeron_t3::SidebarSection::Settled => {
+                            "No settled threads. Use Settle in the chat header to finish a thread."
+                        }
+                        zeron_t3::SidebarSection::Snoozed => {
+                            "No snoozed threads. Right-click a thread to snooze it."
+                        }
+                        _ => "No active threads. Start a new thread with +.",
+                    }
+                })
                 .into_any_element()
         };
 

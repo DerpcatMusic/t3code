@@ -5055,6 +5055,8 @@ impl Shell {
         let mut rendered = Vec::new();
         let mut moving_row = None;
         let windowed = !self.state.read(cx).t3_sidebar.is_empty()
+            && self.settings.sidebar_organization == SidebarOrganization::ByStatus
+            && custom_sections.is_empty()
             && self.sidebar_session_transfer.is_none()
             && self.sidebar_session_return.is_none()
             && self.pinned_session_drag.is_none();
@@ -5131,6 +5133,9 @@ impl Shell {
                 let visible = !windowed
                     || group.is_none()
                     || is_selected
+                    || self
+                        .rename_input_for(&chat.id, ChatRenameSurface::Sidebar)
+                        .is_some()
                     || (!collapsed
                         && content_y + height >= viewport_top - 120.0
                         && content_y <= viewport_top + viewport_height + 120.0);

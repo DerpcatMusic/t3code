@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use zeron_doc::{MessagePart, SessionMessageEntry, TranscriptFrame, TranscriptUpsert};
+use zeron_doc::{MessagePart, SessionMessageEntry, TranscriptFrame};
 use zeron_proto::{Chat, Session, Space};
 
 pub fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -628,61 +628,36 @@ impl Projection {
             *previous = next;
             return Ok(delta);
         }
-        let id = position
-            .map(|position| previous[position].id.as_str())
-            .unwrap_or(text(item, "id")?)
-            .to_owned();
-        let old = previous.iter().position(|entry| entry.id == id);
-        let mut delta = TranscriptFrame::Delta {
-            upsert: vec![],
-            append: vec![],
-            remove: vec![],
-            count: previous.len(),
+        let Some(position) = position else {
+            return Ok(TranscriptFrame::Delta {
+                upsert: vec![],
+                append: vec![],
+                remove: vec![],
+                count: previous.len(),
+            });
         };
-        match (position, old) {
-            (Some(position), old) => {
-                let changed = self.entry(item, environment)?;
-                let mut next = previous[position].clone();
-                let part = next
-                    .parts
-                    .iter_mut()
-                    .find(|part| part.id() == item["id"].as_str().unwrap_or(""))
-                    .context("changed T3 part missing from work group")?;
-                *part = changed.parts.into_iter().next().unwrap();
-                next.status = Some(self.group_status(&groups[position])?);
-                if let Some(old) = old {
-                    if old == position {
-                        delta = zeron_doc::diff_transcript(
-                            std::slice::from_ref(&previous[old]),
-                            std::slice::from_ref(&next),
-                        );
-                    }
-                    previous.remove(old);
-                }
-                previous.insert(position, next.clone());
-                if let TranscriptFrame::Delta { upsert, count, .. } = &mut delta {
-                    let after = position
-                        .checked_sub(1)
-                        .map(|index| previous[index].id.clone());
-                    if old != Some(position) {
-                        upsert.push(TranscriptUpsert { after, entry: next });
-                    } else if let Some(upsert) = upsert.first_mut() {
-                        upsert.after = after;
-                    }
-                    *count = previous.len();
-                }
+        let changed = self.entry(item, environment)?;
+        let mut next = previous[position].clone();
+        let part = next
+            .parts
+            .iter_mut()
+            .find(|part| part.id() == item["id"].as_str().unwrap_or(""))
+            .context("changed T3 part missing from work group")?;
+        *part = changed.parts.into_iter().next().unwrap();
+        next.status = Some(self.group_status(&groups[position])?);
+        let mut delta = zeron_doc::diff_transcript(
+            std::slice::from_ref(&previous[position]),
+            std::slice::from_ref(&next),
+        );
+        if let TranscriptFrame::Delta { upsert, count, .. } = &mut delta {
+            if let Some(upsert) = upsert.first_mut() {
+                upsert.after = position
+                    .checked_sub(1)
+                    .map(|index| previous[index].id.clone());
             }
-            (None, Some(old)) => {
-                previous.remove(old);
-                delta = TranscriptFrame::Delta {
-                    upsert: vec![],
-                    append: vec![],
-                    remove: vec![id.into()],
-                    count: previous.len(),
-                };
-            }
-            (None, None) => {}
+            *count = previous.len();
         }
+        previous[position] = next;
         Ok(delta)
     }
 
