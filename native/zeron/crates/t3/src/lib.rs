@@ -1,9 +1,12 @@
 //! T3 owns providers, workspaces and durable history. This crate only adapts views.
 
+mod attachments;
 mod projection;
 mod sidebar;
 mod transport;
+mod workspace;
 
+pub use attachments::{attachment_path, parse_attachment_path, visual_reference};
 pub use projection::{GitStats, ThreadDetails};
 pub use sidebar::{
     SidebarCapabilities, SidebarSection, SidebarThread, sidebar_pins, snooze_presets,
@@ -14,7 +17,11 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use projection::{Projection, Shell, approval_choices, harness, option_map, rows, text};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::{RwLock, watch};
 use transport::ConnectionConfig;
 use zeron_doc::{SessionCommandPayload, TranscriptBaseline, TranscriptFrame, TranscriptUpdate};
@@ -23,12 +30,20 @@ use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, methods};
 
 pub const CAPABILITY: &str = "t3.orchestration.v2";
 
+/// Private bootstrap data travels over stdin, never through a URL or command line.
+pub async fn browser_bootstrap(path: &Path) -> Result<Value> {
+    ConnectionConfig::load(path)?.browser_bootstrap().await
+}
+
 pub struct T3Service {
     client: Arc<RwLock<Option<Arc<RpcClient>>>>,
     shell: watch::Receiver<Arc<Shell>>,
     connectivity: watch::Receiver<Value>,
     pub engine_info: EngineInfo,
     pub origin: String,
+    attachments: attachments::Attachments,
+    connection_path: PathBuf,
+    project_write: tokio::sync::Mutex<()>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -169,7 +184,10 @@ impl T3Service {
                 cursor_sdk_version: None,
                 capabilities: vec![CAPABILITY.into()],
             },
+            attachments: attachments::Attachments::new(&config.origin)?,
             origin: config.origin,
+            connection_path: path.to_owned(),
+            project_write: tokio::sync::Mutex::new(()),
             task,
         }))
     }
@@ -268,6 +286,27 @@ impl T3Service {
             }
             return Ok(json!({"ok":true}));
         }
+        if op == "setChatConfig" {
+            let thread = self.thread(id).await?;
+            let providers = self.providers().await?;
+            let config = &params["config"];
+            let selection = model_selection(
+                &providers,
+                &thread["modelSelection"],
+                config["harness"].as_str(),
+                config["model"].as_str(),
+            )?;
+            let mut selection = selection;
+            selection["options"] = json!(
+                option_map(&config["modelOptions"])
+                    .map_err(failed)?
+                    .into_iter()
+                    .map(|(id, value)| json!({"id":id,"value":value}))
+                    .collect::<Vec<_>>()
+            );
+            self.dispatch(json!({"type":if selection["instanceId"] == thread["modelSelection"]["instanceId"] {"thread.model-selection.set"} else {"provider.switch"}, "threadId":id,"modelSelection":selection})).await?;
+            return Ok(json!({"ok":true}));
+        }
         let command = match op {
             "renameChat" => {
                 json!({"type":"thread.metadata.update","threadId":id,"title":text(&params,"title").map_err(failed)?})
@@ -307,26 +346,13 @@ impl T3Service {
                     .iter()
                     .find(|p| p["id"] == project_id)
                     .ok_or_else(|| RpcError::BadParams("select an existing T3 project".into()))?;
-                let mut selection = project["defaultModelSelection"].clone();
                 let providers = self.providers().await?;
-                if let Some(h) = params["config"]["harness"].as_str() {
-                    let matches: Vec<_> = providers
-                        .iter()
-                        .filter(|p| {
-                            harness(p["driver"].as_str().unwrap_or("")) == Some(h)
-                                && p["enabled"] == true
-                        })
-                        .collect();
-                    if let [provider] = matches.as_slice() {
-                        let model = params["config"]["model"]
-                            .as_str()
-                            .or_else(|| provider["models"].as_array()?.first()?["slug"].as_str())
-                            .ok_or_else(|| RpcError::BadParams("select a T3 model".into()))?;
-                        selection = json!({"instanceId":provider["instanceId"],"model":model});
-                    } else {
-                        return Err(RpcError::BadParams("select a project with an unambiguous T3 provider; custom provider instances need the T3 picker".into()));
-                    }
-                }
+                let selection = model_selection(
+                    &providers,
+                    &project["defaultModelSelection"],
+                    params["config"]["harness"].as_str(),
+                    params["config"]["model"].as_str(),
+                )?;
                 if selection.is_null() {
                     return Err(RpcError::BadParams(
                         "set this project's default model in T3 first".into(),
@@ -366,46 +392,31 @@ impl T3Service {
                 message_id,
             } => {
                 command_id = format!("zeron:{id}:{message_id}");
-                if !request.attachments.is_empty()
-                    || request.worktree.is_some()
+                if request.worktree.is_some()
                     || params["transfers"]
                         .as_array()
                         .is_some_and(|a| !a.is_empty())
                 {
                     return Err(RpcError::BadParams(
-                        "native T3 attachments and worktree preparation are not migrated yet"
-                            .into(),
+                        "Use T3's worktree controls to prepare this thread.".into(),
                     ));
                 }
-                let mut selection = thread["modelSelection"].clone();
                 let providers = self.providers().await?;
+                let requested_harness = request
+                    .harness
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(failed)?;
+                let explicit_model = request.model.is_some();
+                let mut selection = model_selection(
+                    &providers,
+                    &thread["modelSelection"],
+                    requested_harness.as_ref().and_then(Value::as_str),
+                    request.model.as_deref(),
+                )?;
                 let current = providers
                     .iter()
                     .find(|p| p["instanceId"] == selection["instanceId"]);
-                if let Some(h) = request.harness {
-                    let h =
-                        serde_json::to_value(h).map_err(|e| RpcError::BadParams(e.to_string()))?;
-                    if current.and_then(|p| harness(p["driver"].as_str()?)) != h.as_str() {
-                        return Err(RpcError::BadParams(
-                            "provider handoff needs T3's handoff controls".into(),
-                        ));
-                    }
-                }
-                // Preserve the actual instance id, including multiple instances of one driver.
-                let explicit_model = request.model.is_some();
-                if let Some(model) = request.model {
-                    if !current.is_some_and(|provider| {
-                        provider["models"].as_array().is_some_and(|models| {
-                            models.iter().any(|candidate| candidate["slug"] == model)
-                        })
-                    }) {
-                        return Err(RpcError::BadParams(
-                            "this model is not advertised by the thread's T3 provider instance"
-                                .into(),
-                        ));
-                    }
-                    selection["model"] = json!(model);
-                }
                 let mut options = if explicit_model {
                     Default::default()
                 } else {
@@ -467,8 +478,19 @@ impl T3Service {
                         .map(|(id, value)| json!({"id":id,"value":value}))
                         .collect::<Vec<_>>()
                 );
-                json!({"type":"message.dispatch","threadId":id,"messageId":message_id,"text":request.prompt,
-                    "attachments":[],"modelSelection":selection,"deliveryIntent":"auto",
+                let attachments = request
+                    .attachments
+                    .iter()
+                    .map(|path| {
+                        parse_attachment_path(path).ok_or_else(|| {
+                            RpcError::BadParams("Attach the file again before sending.".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let prompt =
+                    attachments::prompt_without_refs(&request.prompt, &request.attachments);
+                json!({"type":"message.dispatch","threadId":id,"messageId":message_id,"text":prompt,
+                    "attachments":attachments,"modelSelection":selection,"deliveryIntent":"auto",
                     "dispatchMode":{"type":"queue_after_active"},"createdBy":"user","creationSource":"web"})
             }
             SessionCommandPayload::Steer { prompt, message_id } => {
@@ -506,6 +528,95 @@ fn visit_command(id: &str, thread: &Value) -> Result<Value, RpcError> {
     let seen = text(thread, "updatedAt").map_err(failed)?;
     chrono::DateTime::parse_from_rfc3339(seen).map_err(failed)?;
     Ok(json!({"type":"thread.visit","threadId":id,"visitedAt":seen}))
+}
+
+pub(crate) fn native_model_id(instance: &str, model: &str) -> String {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    format!(
+        "t3-model:{}",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&(instance, model)).expect("string pair"))
+    )
+}
+
+fn model_selection(
+    providers: &[Value],
+    fallback: &Value,
+    requested_harness: Option<&str>,
+    model: Option<&str>,
+) -> Result<Value, RpcError> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let encoded = model.and_then(|m| m.strip_prefix("t3-model:"));
+    let decoded: Option<(String, String)> = encoded
+        .map(|s| {
+            if s.len() > 8192 {
+                return Err(RpcError::BadParams("Invalid model selection".into()));
+            }
+            let bytes = URL_SAFE_NO_PAD.decode(s).map_err(failed)?;
+            serde_json::from_slice(&bytes).map_err(failed)
+        })
+        .transpose()?;
+    let instance = decoded.as_ref().map(|p| p.0.as_str());
+    let slug = decoded
+        .as_ref()
+        .map(|p| p.1.as_str())
+        .or(model)
+        .or(fallback["model"].as_str());
+    let eligible = |p: &&Value| {
+        p["enabled"] == true
+            && requested_harness
+                .is_none_or(|h| harness(p["driver"].as_str().unwrap_or("")) == Some(h))
+    };
+    let provider = if let Some(instance) = instance {
+        providers
+            .iter()
+            .filter(eligible)
+            .find(|p| p["instanceId"] == instance)
+    } else {
+        providers
+            .iter()
+            .filter(eligible)
+            .find(|p| {
+                p["instanceId"] == fallback["instanceId"]
+                    && slug.is_none_or(|slug| {
+                        p["models"]
+                            .as_array()
+                            .is_some_and(|m| m.iter().any(|m| m["slug"] == slug))
+                    })
+            })
+            .or_else(|| {
+                let mut matches = providers.iter().filter(eligible).filter(|p| {
+                    slug.is_none_or(|slug| {
+                        p["models"]
+                            .as_array()
+                            .is_some_and(|m| m.iter().any(|m| m["slug"] == slug))
+                    })
+                });
+                let first = matches.next()?;
+                matches.next().is_none().then_some(first)
+            })
+    }
+    .ok_or_else(|| RpcError::BadParams("Choose an available provider and model.".into()))?;
+    let slug = slug
+        .or_else(|| provider["models"].as_array()?.first()?["slug"].as_str())
+        .ok_or_else(|| RpcError::BadParams("This provider has no models.".into()))?;
+    if !provider["models"]
+        .as_array()
+        .is_some_and(|models| models.iter().any(|m| m["slug"] == slug))
+    {
+        return Err(RpcError::BadParams(
+            "This model is unavailable on the selected provider.".into(),
+        ));
+    }
+    let mut selected = if provider["instanceId"] == fallback["instanceId"]
+        && slug == fallback["model"].as_str().unwrap_or("")
+    {
+        fallback.clone()
+    } else {
+        json!({})
+    };
+    selected["instanceId"] = provider["instanceId"].clone();
+    selected["model"] = json!(slug);
+    Ok(selected)
 }
 
 fn native_model(model: &Value) -> Result<Value> {
@@ -592,12 +703,75 @@ fn input_response(
             .1;
         value["decision"] = json!(decision);
     } else if request["kind"] == "user_input" {
-        value["answers"] = Value::Object(
-            answers
-                .into_iter()
-                .map(|a| (a.question_id, json!({"answers":a.labels})))
-                .collect(),
-        );
+        let item = rows(projection, "visibleTurnItems")
+            .map_err(failed)?
+            .iter()
+            .find(|row| {
+                row["item"]["type"] == "user_input_request"
+                    && row["item"]["requestId"] == request_id
+            })
+            .ok_or_else(|| {
+                RpcError::BadParams(
+                    "The questions for this request are unavailable. Reopen the thread.".into(),
+                )
+            })?;
+        let questions = rows(&item["item"], "questions").map_err(failed)?;
+        let mut mapped = serde_json::Map::new();
+        for question in questions {
+            let question_id = text(question, "id").map_err(failed)?;
+            let answer = answers.iter().find(|a| a.question_id == question_id);
+            let labels = answer.map(|a| a.labels.as_slice()).unwrap_or_default();
+            if labels.is_empty() || labels.iter().all(|label| label.trim().is_empty()) {
+                if question["required"] == false {
+                    continue;
+                }
+                return Err(RpcError::BadParams(format!(
+                    "Answer {} before sending.",
+                    question["header"].as_str().unwrap_or("each question")
+                )));
+            }
+            let options = question["options"].as_array();
+            let values = labels
+                .iter()
+                .map(|label| {
+                    let option = options
+                        .into_iter()
+                        .flatten()
+                        .find(|option| option["label"] == *label);
+                    if option.is_none() && question["allowCustomAnswer"] == false {
+                        return Err(RpcError::BadParams("Choose an advertised answer.".into()));
+                    }
+                    Ok(option
+                        .and_then(|option| option["value"].as_str())
+                        .unwrap_or(label)
+                        .to_owned())
+                })
+                .collect::<Result<Vec<_>, RpcError>>()?;
+            if values.len() > 1 && question["multiSelect"] != true {
+                return Err(RpcError::BadParams(
+                    "Choose one answer for this question.".into(),
+                ));
+            }
+            // T3 owns provider-specific conversion. Asynchronous questions resume with text.
+            let answer = if request["responseCapability"]["type"] == "message"
+                || question["multiSelect"] != true
+            {
+                json!(values.join(", "))
+            } else {
+                json!(values)
+            };
+            mapped.insert(question_id.into(), answer);
+        }
+        if answers.iter().any(|answer| {
+            !questions
+                .iter()
+                .any(|question| question["id"] == answer.question_id)
+        }) {
+            return Err(RpcError::BadParams(
+                "An answer belongs to a different request.".into(),
+            ));
+        }
+        value["answers"] = Value::Object(mapped);
     } else {
         return Err(RpcError::BadParams(
             "this T3 runtime request needs the T3 controls".into(),
@@ -724,11 +898,21 @@ impl RpcService for T3Service {
                 for provider in providers.iter().filter(|p| {
                     harness(p["driver"].as_str().unwrap_or("")) == params["harness"].as_str()
                 }) {
+                    if provider["enabled"] != true {
+                        continue;
+                    }
                     for model in rows(provider, "models").map_err(failed)? {
-                        if models.iter().any(|m: &Value| m["id"] == model["slug"]) {
-                            continue;
-                        }
-                        models.push(native_model(model).map_err(failed)?);
+                        let mut native = native_model(model).map_err(failed)?;
+                        native["id"] = json!(native_model_id(
+                            text(provider, "instanceId").map_err(failed)?,
+                            text(model, "slug").map_err(failed)?
+                        ));
+                        native["label"] = json!(format!(
+                            "{} · {}",
+                            model["name"].as_str().unwrap_or("Model"),
+                            provider["displayName"].as_str().unwrap_or("Provider")
+                        ));
+                        models.push(native);
                     }
                 }
                 RpcReply::value(&models)
@@ -752,6 +936,26 @@ impl RpcService for T3Service {
             }
             methods::MUTATE => self.mutate(params).await.map(RpcReply::Value),
             methods::QUEUE_COMMAND => self.command(params).await.map(RpcReply::Value),
+            methods::UPLOAD_CHUNK => self.attachments.chunk(params).await.map(RpcReply::Value),
+            methods::UPLOAD_COMMIT => self
+                .attachments
+                .commit(self.client().await?.as_ref(), params)
+                .await
+                .map(RpcReply::Value),
+            methods::READ_ATTACHMENT_CHUNK => self
+                .attachments
+                .read(self.client().await?.as_ref(), params)
+                .await
+                .map(RpcReply::Value),
+            "T3AssetUrl" => self
+                .attachments
+                .url(self.client().await?.as_ref(), params["resource"].clone())
+                .await
+                .map(|url| RpcReply::Value(json!({"url":url}))),
+            "T3BrowserBootstrap" => browser_bootstrap(&self.connection_path)
+                .await
+                .map(RpcReply::Value)
+                .map_err(failed),
             methods::WATCH_DOC_MESSAGES => {
                 let id = text(&params, "chatId").map_err(failed)?;
                 let client = self.client().await?;
@@ -953,6 +1157,17 @@ impl RpcService for T3Service {
                 );
                 Ok(RpcReply::Stream(Box::pin(stream)))
             }
+            methods::LIST_PROJECT_ACTIONS
+            | methods::UPSERT_PROJECT_ACTION
+            | methods::DELETE_PROJECT_ACTION
+            | methods::RUN_PROJECT_ACTION
+            | methods::OPEN_TERMINAL
+            | methods::WRITE_TERMINAL
+            | methods::RESIZE_TERMINAL
+            | methods::CLOSE_TERMINAL
+            | methods::SUBSCRIBE_TERMINAL
+            | "T3OpenInEditor"
+            | "T3InitializeGit" => self.workspace(method, params).await,
             // ponytail: add remaining native controls with their T3 RPC mapping; never fall through to Zeron's engine.
             _ => Err(RpcError::UnknownMethod(format!(
                 "{method} (not yet migrated to T3)"
@@ -987,6 +1202,70 @@ mod tests {
         assert_eq!(model["options"][0]["defaultChoice"], "high");
         assert_eq!(model["options"][1]["defaultChoice"], "true");
         assert_eq!(model["options"][1]["choices"][0]["id"], "false");
+    }
+
+    #[test]
+    fn provider_instances_with_the_same_model_remain_distinct() {
+        let providers = json!([{"instanceId":"home","driver":"codex","enabled":true,"models":[{"slug":"same"}]},{"instanceId":"work","driver":"codex","enabled":true,"models":[{"slug":"same"}]}]);
+        let providers = providers.as_array().unwrap();
+        let current =
+            json!({"instanceId":"home","model":"same","options":[{"id":"fast","value":true}]});
+        assert_eq!(
+            model_selection(providers, &current, Some("codex"), Some("same")).unwrap(),
+            current
+        );
+        let picked = model_selection(
+            providers,
+            &current,
+            Some("codex"),
+            Some(&native_model_id("work", "same")),
+        )
+        .unwrap();
+        assert_eq!(picked["instanceId"], "work");
+        assert!(picked["options"].is_null());
+        assert!(model_selection(providers, &Value::Null, Some("codex"), Some("same")).is_err());
+        assert!(
+            model_selection(
+                providers,
+                &current,
+                Some("claude-code"),
+                Some(&native_model_id("work", "same"))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn asynchronous_questions_use_text_and_live_multiselect_uses_values() {
+        let mut projection = json!({"runtimeRequests":[{"id":"r","kind":"user_input","status":"pending","responseCapability":{"type":"message"}}],"visibleTurnItems":[{"item":{"type":"user_input_request","requestId":"r","questions":[{"id":"q","header":"Colors","multiSelect":true,"allowCustomAnswer":false,"options":[{"label":"Red","value":"red"},{"label":"Blue","value":"blue"}]}]}}]});
+        let answer = || {
+            vec![UserInputAnswer {
+                question_id: "q".into(),
+                labels: vec!["Red".into(), "Blue".into()],
+            }]
+        };
+        assert_eq!(
+            input_response("thread", "r", answer(), &projection).unwrap()["answers"]["q"],
+            "red, blue"
+        );
+        projection["runtimeRequests"][0]["responseCapability"]["type"] = json!("live");
+        assert_eq!(
+            input_response("thread", "r", answer(), &projection).unwrap()["answers"]["q"],
+            json!(["red", "blue"])
+        );
+        assert!(input_response("thread", "r", vec![], &projection).is_err());
+        assert!(
+            input_response(
+                "thread",
+                "r",
+                vec![UserInputAnswer {
+                    question_id: "q".into(),
+                    labels: vec!["Unknown".into()]
+                }],
+                &projection
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1028,10 +1307,10 @@ mod tests {
         projection["visibleTurnItems"] = json!([]);
         assert!(input_response("thread", "request", answer(), &projection).is_err());
         projection["runtimeRequests"][0]["kind"] = json!("user_input");
+        projection["visibleTurnItems"] = json!([{"item":{"type":"user_input_request","requestId":"request","questions":[{"id":"request","header":"Decision","options":[{"label":"Allow once","value":"allow"}]}]}}]);
         assert_eq!(
-            input_response("thread", "request", answer(), &projection).unwrap()["answers"]["request"]
-                ["answers"],
-            json!(["Allow once"])
+            input_response("thread", "request", answer(), &projection).unwrap()["answers"]["request"],
+            json!("allow")
         );
     }
 }

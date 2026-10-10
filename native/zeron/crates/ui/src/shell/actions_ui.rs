@@ -525,6 +525,204 @@ impl Shell {
         .detach();
     }
 
+    fn t3_project_command(&mut self, method: &'static str, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        if self.active_chat.is_empty() {
+            return;
+        }
+        let chat = self.active_chat.clone();
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(method, serde_json::json!({"chatId":chat}))
+                .await;
+            this.update(cx, |shell, cx| {
+                shell.sidebar_notice = Some(match result {
+                    Ok(_) => {
+                        if method == "T3InitializeGit" {
+                            "Git initialized".into()
+                        } else {
+                            "Opened in Zed".into()
+                        }
+                    }
+                    Err(error) => format!("Project action failed: {error}").into(),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_t3_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let result = engine
+                .client()
+                .call("T3BrowserBootstrap", serde_json::json!({}))
+                .await;
+            this.update_in(cx, |shell, window, cx| match result {
+                Ok(session) => {
+                    shell.set_surfaces_open(true, cx);
+                    shell.add_browser_surface(None, window, cx);
+                    if let RightSurface::Browser(id) = shell.resolved_right_active(cx) {
+                        #[cfg(target_os = "linux")]
+                        if let Some(browser) = shell.browsers.get(&id) {
+                            browser.update(cx, |browser, cx| {
+                                browser.open_t3_settings(session, window, cx)
+                            });
+                        }
+                    }
+                }
+                Err(error) => {
+                    shell.sidebar_notice = Some(format!("Settings could not open: {error}").into());
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(super) fn render_t3_project_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_project_actions(cx);
+        let theme = Theme::of(cx).clone();
+        let state = self.state.read(cx);
+        let host = state
+            .selected_chat_row()
+            .and_then(|chat| state.devices.iter().find(|d| d.id == chat.device_id))
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| "T3 environment".into());
+        let path = state
+            .selected_chat_row()
+            .and_then(|chat| chat.cwd.clone())
+            .unwrap_or_default();
+        let details = state.t3_details.get(&self.active_chat).cloned();
+        let git = details
+            .as_ref()
+            .and_then(|d| d.git.as_ref())
+            .is_some_and(|g| g.branch.is_some());
+        let actions = self
+            .project_actions
+            .visible_snapshot()
+            .map(|s| s.actions.clone())
+            .unwrap_or_default();
+        let row = |id: &'static str, icon_path: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .w_full()
+                .h(px(34.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .rounded(px(7.0))
+                .text_size(crate::typography::ui_rems(13.0))
+                .text_color(theme.text)
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::ink(0.05)))
+                .child(icon(icon_path).size(px(15.0)).text_color(theme.text_muted))
+                .child(label)
+        };
+        let mut card = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .p(px(6.0))
+            .rounded(px(16.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_card)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text_muted)
+                    .child(icon(icons::MONITOR).size(px(14.0)))
+                    .child(SharedString::from(host)),
+            )
+            .child(
+                div()
+                    .px(px(12.0))
+                    .pb(px(5.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .truncate()
+                    .child(SharedString::from(path)),
+            )
+            .child(
+                row("t3-open-editor", icons::TERMINAL, "Open in Zed").on_click(
+                    cx.listener(|this, _, _, cx| this.t3_project_command("T3OpenInEditor", cx)),
+                ),
+            )
+            .child(
+                row("t3-add-script", icons::PLUS, "Add project script").on_click(
+                    cx.listener(|this, _, _, cx| this.open_project_action_editor(None, None, cx)),
+                ),
+            );
+        for action in actions.into_iter().take(4) {
+            let Some(key) = self.project_actions.active.clone() else {
+                break;
+            };
+            let label = action.name.clone();
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("t3-script-{}", action.id)))
+                    .w_full()
+                    .h(px(32.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .rounded(px(7.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(crate::theme::ink(0.05)))
+                    .child(icon(icons::TERMINAL).size(px(14.0)))
+                    .child(SharedString::from(label))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.run_project_action(&key, action.clone(), cx)
+                    })),
+            );
+        }
+        card = card.child(div().h(px(1.0)).mx(px(12.0)).my(px(5.0)).bg(theme.border));
+        card = if git {
+            card.child(
+                row("t3-project-diff", icons::GIT_BRANCH, "Changes")
+                    .on_click(cx.listener(|this, _, window, cx| this.add_diff_surface(window, cx))),
+            )
+        } else {
+            card.child(
+                row("t3-initialize-git", icons::GIT_BRANCH, "Initialize Git").on_click(
+                    cx.listener(|this, _, _, cx| this.t3_project_command("T3InitializeGit", cx)),
+                ),
+            )
+        };
+        card = card
+            .child(
+                row("t3-project-terminal", icons::TERMINAL, "Terminal")
+                    .on_click(cx.listener(|this, _, _, cx| this.add_terminal_surface(cx))),
+            )
+            .child(
+                row(
+                    "t3-project-settings",
+                    icons::SETTINGS,
+                    "Providers and devices",
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.open_t3_settings(window, cx))),
+            );
+        div().flex_none().p(px(12.0)).child(card).into_any_element()
+    }
+
     pub(super) fn render_project_actions_control(
         &mut self,
         available_titlebar_width: f32,

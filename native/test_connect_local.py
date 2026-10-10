@@ -50,10 +50,12 @@ class LocalConnectionTests(unittest.TestCase):
         path, issue = self.prepare()
         command = issue.call_args.args[0]
         self.assertEqual(command[:5], [str(self.home / "bin/t3"), "auth", "session", "issue", "--base-dir"])
-        self.assertEqual(command.count("--scope"), 2)
+        self.assertEqual(command.count("--scope"), len(connect.SCOPES))
         self.assertIn("orchestration:read", command)
         self.assertIn("orchestration:operate", command)
-        self.assertNotIn("access:write", command)
+        self.assertIn("providers:manage", command)
+        self.assertIn("terminal:operate", command)
+        self.assertNotIn("environment:maintain", command)
         data = json.loads(path.read_text())
         self.assertEqual(data["environmentId"], self.identity)
         self.assertEqual(data["origin"], "http://127.0.0.1:3774")
@@ -90,6 +92,15 @@ class LocalConnectionTests(unittest.TestCase):
                  patch.object(connect.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(self.issued), "")) as issue:
                 connect.prepare_connection()
             issue.assert_called_once()
+
+    def test_old_login_is_renewed_when_new_controls_need_scopes(self):
+        self.prepare()
+        path = self.settings / "local-session.json"
+        data = json.loads(path.read_text())
+        data["scopes"] = ["orchestration:read", "orchestration:operate"]
+        path.write_text(json.dumps(data))
+        _, issue = self.prepare()
+        issue.assert_called_once()
 
     def test_identity_mismatch_never_sends_credentials(self):
         self.prepare()

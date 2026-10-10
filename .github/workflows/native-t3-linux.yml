@@ -1,4 +1,4 @@
-name: Native T3 Linux
+name: Z3-code Linux
 
 on:
   push:
@@ -9,9 +9,16 @@ on:
       - 'native/test_connect_local.py'
       - '.github/workflows/native-t3-linux.yml'
   workflow_dispatch:
+    inputs:
+      check_upstream:
+        description: Build against current upstream T3
+        type: boolean
+        default: false
+  schedule:
+    - cron: '15 4 * * *'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: native-t3-linux-${{ github.ref }}
@@ -30,6 +37,16 @@ jobs:
       ORT_PREFER_DYNAMIC_LINK: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check current upstream without changing the release branch
+        if: github.event_name == 'schedule' || inputs.check_upstream
+        run: |
+          git config user.name 'Z3-code CI'
+          git config user.email 'ci@users.noreply.github.com'
+          git fetch https://github.com/pingdotgg/t3code.git main
+          git merge --no-edit FETCH_HEAD
+
       - name: Local connection tests
         run: python3 -m unittest discover -s .. -p test_connect_local.py -v
       - name: Linux desktop dependencies
@@ -61,36 +78,51 @@ jobs:
         run: cargo test --release --locked -p zeron-t3 --lib -j2
       - name: User bubble layout regression
         run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib user_bubbles_wrap_during_virtual_list_layout -j2
+      - name: Question wizard regression
+        run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib wizard_ -j2
       - name: Native desktop
         run: cargo build --release --locked -p zeron --bin zeron -j2
       - name: Separate preference paths
         run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron --bin zeron paths::tests -j2
       - name: Integration clients
         run: cargo build --release --locked -p zeron-t3 --examples -j2
-      - name: Package experimental client
+      - name: Package Z3-code
         run: |
-          native_bundle="$RUNNER_TEMP/native-t3-linux-x64"
+          native_bundle="$RUNNER_TEMP/z3-code-linux-x64"
           mkdir -p "$native_bundle/lib"
           cp target/release/zeron "$native_bundle/zeron"
           cp target/release/examples/smoke target/release/examples/exercise target/release/examples/sidebar "$native_bundle/"
-          cp ../launch-t3 "$native_bundle/native-t3"
+          cp ../launch-t3 "$native_bundle/z3-code"
           cp ../connect-local.py "$native_bundle/connect-local.py"
-          chmod +x "$native_bundle/native-t3"
+          chmod +x "$native_bundle/z3-code"
           cp -a "$ORT_LIB_LOCATION/." "$native_bundle/lib/"
           cp LICENSE "$native_bundle/LICENSE-Zeron"
           cp ../../LICENSE "$native_bundle/LICENSE-T3"
           cp "$NATIVE_ORT_ROOT/LICENSE" "$native_bundle/LICENSE-ONNX-Runtime"
           cp "$NATIVE_ORT_ROOT/ThirdPartyNotices.txt" "$native_bundle/ONNX-ThirdPartyNotices.txt"
           cp ../README.md "$native_bundle/README.md"
-          sh -n "$native_bundle/native-t3"
-          if env -u ZERON_T3_CONNECTION T3CODE_HOME="$RUNNER_TEMP/missing-native-t3-home" "$native_bundle/native-t3" --check; then
+          printf '%s\n' "$GITHUB_SHA" > "$native_bundle/BUILD_COMMIT"
+          sh -n "$native_bundle/z3-code"
+          if env -u ZERON_T3_CONNECTION T3CODE_HOME="$RUNNER_TEMP/missing-native-t3-home" "$native_bundle/z3-code" --check; then
             echo 'Native launcher must reject a missing local T3 server' >&2
             exit 1
           fi
-          tar -czf "$RUNNER_TEMP/native-t3-linux-x64.tar.gz" -C "$RUNNER_TEMP" native-t3-linux-x64
+          tar -czf "$RUNNER_TEMP/z3-code-linux-x64.tar.gz" -C "$RUNNER_TEMP" z3-code-linux-x64
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: native-t3-linux-x64
-          path: ${{ runner.temp }}/native-t3-linux-x64.tar.gz
-          retention-days: 3
+          name: z3-code-linux-x64
+          path: ${{ runner.temp }}/z3-code-linux-x64.tar.gz
+          retention-days: 14
           if-no-files-found: error
+      - name: Publish tested Linux download
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feat/native-zeron'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP"
+          sha256sum z3-code-linux-x64.tar.gz > z3-code-linux-x64.tar.gz.sha256
+          gh release create "z3-code-${GITHUB_SHA:0:8}" \
+            z3-code-linux-x64.tar.gz z3-code-linux-x64.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "Z3-code ${GITHUB_SHA:0:8}" \
+            --notes 'Linux x64. Zeron native UI with the T3 Code backend. Start T3, then run z3-code.'

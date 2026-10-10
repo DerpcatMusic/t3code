@@ -62,9 +62,9 @@ pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
-mod todo_panel;
 pub mod theme;
 pub mod theme_library;
+mod todo_panel;
 pub mod transcript;
 pub mod typography;
 pub mod voice;
@@ -395,7 +395,11 @@ fn open_main_window(
                 // Linux/Windows `appears_transparent` hides the system titlebar
                 // for our custom-drawn chrome; harmless where unsupported.
                 titlebar: Some(TitlebarOptions {
-                    title: cfg!(target_os = "windows").then(|| "Zeron".into()),
+                    title: Some(if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+                        "Z3-code".into()
+                    } else {
+                        "Zeron".into()
+                    }),
                     appears_transparent: true,
                     // Native lights are 14px tall: top 14 → center 21, matching
                     // the 38px titlebar row with 4px top-only content padding.

@@ -470,6 +470,46 @@ static void evaluated(GObject *web, GAsyncResult *result, gpointer data) {
     g_clear_object(&v);
     g_clear_error(&error);
 }
+typedef struct { WebKitWebView *web; char *url; } SessionLoad;
+static void session_ready(GObject *manager, GAsyncResult *result, gpointer data) {
+    SessionLoad *load = data;
+    GError *error = NULL;
+    if (webkit_cookie_manager_add_cookie_finish(WEBKIT_COOKIE_MANAGER(manager), result, &error))
+        webkit_web_view_load_uri(load->web, load->url);
+    else
+        webkit_web_view_load_html(load->web, "<p>Could not sign in. Close this settings tab and try again.</p>", NULL);
+    g_clear_error(&error);
+    g_object_unref(load->web);
+    g_free(load->url);
+    g_free(load);
+}
+
+static void load_session(Page *p, JsonObject *o) {
+    const char *origin = string(o, "origin"), *url = string(o, "url");
+    const char *name = string(o, "cookieName"), *token = string(o, "accessToken");
+    if (!allowed(origin) || !allowed(url) || !*name || strlen(name) > 100 || !*token || strlen(token) > 16384)
+        return;
+    for (const char *c = name; *c; c++) if (!g_ascii_isalnum(*c) && *c != '_' && *c != '-') return;
+    for (const char *c = token; *c; c++) if (*c < 0x21 || *c == ';' || *c == 0x7f) return;
+    GUri *base = g_uri_parse(origin, G_URI_FLAGS_NONE, NULL), *target = g_uri_parse(url, G_URI_FLAGS_NONE, NULL);
+    if (!base || !target) { if (base) g_uri_unref(base); if (target) g_uri_unref(target); return; }
+    gboolean same = !g_strcmp0(g_uri_get_scheme(base), g_uri_get_scheme(target)) &&
+        !g_strcmp0(g_uri_get_host(base), g_uri_get_host(target)) && g_uri_get_port(base) == g_uri_get_port(target);
+    if (same) {
+        SoupCookie *cookie = soup_cookie_new(name, token, g_uri_get_host(base), "/", -1);
+        soup_cookie_set_http_only(cookie, TRUE);
+        soup_cookie_set_secure(cookie, !strcmp(g_uri_get_scheme(base), "https"));
+        soup_cookie_set_same_site_policy(cookie, SOUP_SAME_SITE_POLICY_LAX);
+        SessionLoad *load = g_new0(SessionLoad, 1);
+        load->web = g_object_ref(p->web);
+        load->url = g_strdup(url);
+        webkit_cookie_manager_add_cookie(webkit_web_context_get_cookie_manager(context), cookie, NULL, session_ready, load);
+        soup_cookie_free(cookie);
+    }
+    g_uri_unref(base);
+    g_uri_unref(target);
+}
+
 static void command(JsonObject *o) {
     guint id = number(o, "id");
     const char *cmd = string(o, "cmd");
@@ -485,7 +525,9 @@ static void command(JsonObject *o) {
         g_hash_table_remove(pages, GUINT_TO_POINTER(id));
         return;
     }
-    if (!strcmp(cmd, "load")) {
+    if (!strcmp(cmd, "load-session")) {
+        load_session(p, o);
+    } else if (!strcmp(cmd, "load")) {
         const char *url = string(o, "url");
         if (allowed(url))
             webkit_web_view_load_uri(p->web, url);

@@ -984,7 +984,11 @@ impl Default for UiSettings {
             dictation_enabled: false,
             dictation_input: None,
             window_geometry: None,
-            sidebar_width: SIDEBAR_DEFAULT,
+            sidebar_width: if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+                320.0
+            } else {
+                SIDEBAR_DEFAULT
+            },
             sidebar_collapsed: false,
             sidebar_grouped: false,
             sidebar_organization: if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
@@ -994,7 +998,7 @@ impl Default for UiSettings {
             },
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_show_project_label: true,
-            sidebar_compact: true,
+            sidebar_compact: std::env::var_os("ZERON_T3_CONNECTION").is_none(),
             sidebar_show_project_icon: true,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
@@ -1017,7 +1021,7 @@ impl Default for UiSettings {
             files_panel_width: FILES_PANEL_DEFAULT,
             agent_update_notifications: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
-            right_pane_open: false,
+            right_pane_open: std::env::var_os("ZERON_T3_CONNECTION").is_some(),
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
             keymap: KeymapConfig::default(),

@@ -776,11 +776,25 @@ impl Wizard {
 
     /// Explicit submit / auto-advance landing.
     pub fn advance(&mut self) -> WizardStep {
+        if self.answers().get(self.page).is_none_or(|answer| {
+            answer.labels.is_empty() || answer.labels.iter().all(|label| label.trim().is_empty())
+        }) {
+            return WizardStep::Stay;
+        }
         if self.page + 1 < self.questions.len() {
             self.page += 1;
             WizardStep::Stay
         } else {
-            WizardStep::Done(self.answers())
+            let answers = self.answers();
+            if let Some(page) = answers.iter().position(|answer| {
+                answer.labels.is_empty()
+                    || answer.labels.iter().all(|label| label.trim().is_empty())
+            }) {
+                self.page = page;
+                WizardStep::Stay
+            } else {
+                WizardStep::Done(answers)
+            }
         }
     }
 
@@ -9748,7 +9762,7 @@ impl Composer {
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
-        let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
+        let can_advance = wizard.page_has_pick() || !self.input.read(cx).text().trim().is_empty();
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -15741,6 +15755,26 @@ mod tests {
         assert!(wizard_escape_goes_back("escape", true, true));
         assert!(!wizard_escape_goes_back("escape", true, false));
         assert!(!wizard_escape_goes_back("enter", false, true));
+    }
+
+    #[test]
+    fn wizard_does_not_submit_an_empty_answer() {
+        let mut wizard = Wizard::new(
+            "request".into(),
+            vec![
+                question("one", &["Yes"], false),
+                question("two", &["No"], false),
+            ],
+        );
+        assert_eq!(wizard.advance(), WizardStep::Stay);
+        assert_eq!(wizard.page, 0);
+        wizard.select(0);
+        wizard.advance();
+        assert_eq!(wizard.advance(), WizardStep::Stay);
+        wizard.set_typed("   ".into());
+        assert_eq!(wizard.advance(), WizardStep::Stay);
+        wizard.select(0);
+        assert!(matches!(wizard.advance(), WizardStep::Done(_)));
     }
 
     #[test]

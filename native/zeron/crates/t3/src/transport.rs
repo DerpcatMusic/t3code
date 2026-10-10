@@ -24,6 +24,59 @@ pub struct ConnectionConfig {
 }
 
 impl ConnectionConfig {
+    pub async fn browser_bootstrap(&self) -> Result<Value> {
+        let base = self.base_url()?;
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(15))
+            .build()?;
+        let descriptor: Value = http
+            .get(base.join(".well-known/t3/environment")?)
+            .send()
+            .await
+            .context("T3 environment is unavailable")?
+            .error_for_status()?
+            .json()
+            .await?;
+        validate_descriptor(&descriptor, &self.environment_id)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            ensure!(
+                std::fs::metadata(&self.access_token_file)?.mode() & 0o077 == 0,
+                "T3 access token file must be private (chmod 600)"
+            );
+        }
+        let token = std::fs::read_to_string(&self.access_token_file)?;
+        ensure!(!token.trim().is_empty(), "T3 access token file is empty");
+        let session: Value = http
+            .get(base.join("api/auth/session")?)
+            .bearer_auth(token.trim())
+            .send()
+            .await
+            .context("T3 authentication is unavailable")?
+            .error_for_status()?
+            .json()
+            .await?;
+        ensure!(
+            session["authenticated"] == true,
+            "T3 login expired; restart Z3-code to renew it"
+        );
+        let cookie = session["auth"]["sessionCookieName"]
+            .as_str()
+            .context("T3 did not advertise browser authentication")?;
+        ensure!(
+            !cookie.is_empty()
+                && cookie
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+            "Invalid T3 cookie name"
+        );
+        Ok(
+            json!({"origin":self.origin,"cookieName":cookie,"accessToken":token.trim(),"label":descriptor["label"]}),
+        )
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let config: Self = serde_json::from_slice(&std::fs::read(path)?)?;
         config.base_url()?;

@@ -363,6 +363,23 @@ impl BrowserSurface {
         cx.notify();
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn open_t3_settings(
+        &mut self,
+        session: serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(origin) = session["origin"].as_str() else {
+            return;
+        };
+        let url = format!("{origin}/settings");
+        self.navigate(&url, window, cx);
+        if let Some(native) = &self.native {
+            native.command(serde_json::json!({"cmd":"load-session","url":url,"origin":origin,"cookieName":session["cookieName"],"accessToken":session["accessToken"]}));
+        }
+    }
+
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.address.read(cx).text().to_owned();
         self.navigate(&url, window, cx);

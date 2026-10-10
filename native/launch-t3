@@ -8,7 +8,7 @@ if [ -z "${ZERON_T3_CONNECTION:-}" ]; then
 fi
 if [ "${1:-}" = "--check" ]; then
   test -f "$ZERON_T3_CONNECTION"
-  printf 'Native T3 connection ready. No app or agent started.\n'
+  printf 'Z3-code connection ready. No app or agent started.\n'
   exit 0
 fi
 export LD_LIBRARY_PATH="$native_bundle_dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

@@ -207,7 +207,7 @@ impl Shell {
                     .and_then(|p| harness(p["driver"].as_str()?))
                     .map(|h| {
                         json!({
-                            "harness":h, "model":selection["model"], "reasoning":null,
+                            "harness":h, "model":super::native_model_id(selection["instanceId"].as_str().unwrap_or(""), selection["model"].as_str().unwrap_or("")), "reasoning":null,
                             "modelOptions":options,
                             "sandbox":if t["runtimeMode"]=="full-access" {"danger-full-access"} else {"workspace-write"},
                         })
@@ -670,7 +670,23 @@ impl Projection {
         );
         let part = match kind {
             "user_message" | "assistant_message" => {
-                json!({"kind":"text","id":id,"text":item["text"]})
+                let mut body = item["text"].as_str().unwrap_or_default().to_owned();
+                if let Some(attachments) = item["attachments"].as_array().filter(|a| !a.is_empty())
+                {
+                    let paths = attachments
+                        .iter()
+                        .map(crate::attachment_path)
+                        .collect::<Result<Vec<_>>>()?;
+                    body.push_str("\n\nAttached images (local files — open them to view):\n");
+                    body.push_str(
+                        &paths
+                            .iter()
+                            .map(|path| format!("- {path}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+                json!({"kind":"text","id":id,"text":body})
             }
             "reasoning" => json!({"kind":"reasoning","id":id,"text":item["text"]}),
             "proposed_plan" => json!({"kind":"text","id":id,"text":item["markdown"]}),
@@ -703,6 +719,21 @@ impl Projection {
                     "resolved":request.is_some_and(|r| r["status"] != "pending")})
             }
             _ => {
+                if kind == "dynamic_tool"
+                    && let Some(reference) = crate::visual_reference(&item["output"])
+                {
+                    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+                    let resource = json!({"_tag":"attachment","attachmentId":reference["attachmentId"],"fileName":"visual.html","mimeType":"text/html","disposition":"inline"});
+                    let title = reference["title"]
+                        .as_str()
+                        .unwrap_or("Interactive visual")
+                        .replace(['[', ']', '\n', '\r'], " ");
+                    let link = format!(
+                        "[Open {title}](t3-visual:{})",
+                        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&resource)?)
+                    );
+                    return self.entry(&json!({"id":id,"type":"assistant_message","text":link,"startedAt":item["startedAt"],"updatedAt":item["updatedAt"],"status":item["status"]}), environment);
+                }
                 let call = match kind {
                     "command_execution" => json!({"kind":"exec","command":item["input"]}),
                     "file_change" => json!({"kind":"applyPatch","path":text(item,"fileName")?}),

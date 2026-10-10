@@ -17,7 +17,9 @@ from uuid import UUID
 
 T3_HOME = Path(os.environ.get("T3CODE_HOME", str(Path.home() / ".t3"))).expanduser().resolve()
 SETTINGS = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "native-t3"
-SCOPES = ["orchestration:read", "orchestration:operate"]
+SCOPES = ["orchestration:read", "orchestration:operate", "settings:write", "providers:manage",
+          "terminal:read", "terminal:operate", "source-control:write", "filesystem:read",
+          "preview:operate", "access:read", "access:write", "relay:read", "relay:write"]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -96,6 +98,7 @@ def prepare_connection():
             if (
                 session["environmentId"] == identity
                 and session["baseDir"] == str(T3_HOME)
+                and set(SCOPES).issubset(session.get("scopes", []))
                 and expires > datetime.now(timezone.utc) + timedelta(minutes=5)
             ):
                 candidate = token_file.read_text().strip()
@@ -111,8 +114,8 @@ def prepare_connection():
             # ponytail: renew at launch; reopen after a continuous 30-day session.
             issued = subprocess.run(
                 [str(cli), "auth", "session", "issue", "--base-dir", str(T3_HOME),
-                 "--scope", SCOPES[0], "--scope", SCOPES[1], "--ttl", "30d",
-                 "--label", "Native T3", "--subject", "native-t3", "--json"],
+                 *[arg for scope in SCOPES for arg in ("--scope", scope)], "--ttl", "30d",
+                 "--label", "Z3-code", "--subject", "z3-code", "--json"],
                 capture_output=True, text=True, timeout=30,
             )
             if issued.returncode != 0:
@@ -124,7 +127,7 @@ def prepare_connection():
             write_private(token_file, token + "\n")
             write_private(session_file, json.dumps({
                 "environmentId": identity, "baseDir": str(T3_HOME),
-                "sessionId": session["sessionId"], "expiresAt": session["expiresAt"],
+                "sessionId": session["sessionId"], "expiresAt": session["expiresAt"], "scopes": SCOPES,
             }) + "\n")
         connection = SETTINGS / "connection.json"
         write_private(connection, json.dumps({
@@ -137,8 +140,8 @@ if __name__ == "__main__":
     try:
         print(prepare_connection())
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as error:
-        message = "Open T3 Code, then launch Native T3 again. " + str(error)
-        print("Native T3: " + message, file=sys.stderr)
+        message = "Open T3 Code, then launch Z3-code again. " + str(error)
+        print("Z3-code: " + message, file=sys.stderr)
         if (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and shutil.which("zenity"):
-            subprocess.run(["zenity", "--error", "--title=Native T3", "--text=" + message])
+            subprocess.run(["zenity", "--error", "--title=Z3-code", "--text=" + message])
         sys.exit(1)

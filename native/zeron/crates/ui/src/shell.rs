@@ -3551,6 +3551,53 @@ impl Shell {
         if !from_main && !self.side_chat_open_here(&source, cx) {
             return LinkOutcome::Rejected;
         }
+        if let Some(encoded) = activation.target.original.strip_prefix("t3-visual:") {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+            if std::env::var_os("ZERON_T3_CONNECTION").is_none() || encoded.len() > 4096 {
+                return LinkOutcome::Rejected;
+            }
+            let resource = URL_SAFE_NO_PAD
+                .decode(encoded)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            let Some(resource) = resource.filter(|r| {
+                r["_tag"] == "attachment"
+                    && r["mimeType"] == "text/html"
+                    && r["disposition"] == "inline"
+            }) else {
+                return LinkOutcome::Rejected;
+            };
+            let Some(engine) = self.state.read(cx).engine().cloned() else {
+                return LinkOutcome::Rejected;
+            };
+            cx.spawn_in(window, async move |this, cx| {
+                let result = engine
+                    .client()
+                    .call("T3AssetUrl", serde_json::json!({"resource":resource}))
+                    .await;
+                this.update_in(cx, |shell, window, cx| {
+                    if shell.active_chat != source {
+                        return;
+                    }
+                    match result {
+                        Ok(value) => {
+                            if let Some(url) = value["url"].as_str() {
+                                shell.set_surfaces_open(true, cx);
+                                shell.add_browser_surface(Some(url.into()), window, cx);
+                            }
+                        }
+                        Err(error) => {
+                            shell.sidebar_notice =
+                                Some(format!("Visual could not open: {error}").into());
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return LinkOutcome::Internal;
+        }
         if activation.target.navigation.is_err() {
             return if matches!(
                 activation.action,
@@ -11360,7 +11407,11 @@ impl Shell {
                 !matches!(self.resolved_right_active(cx), RightSurface::SideChat(_)),
                 |el| el.pt(px(Theme::TITLEBAR_HEIGHT)),
             )
-            .child(content);
+            .when(
+                std::env::var_os("ZERON_T3_CONNECTION").is_some() && !self.active_chat.is_empty(),
+                |el| el.child(self.render_t3_project_panel(cx)),
+            )
+            .child(div().flex_1().min_h_0().child(content));
         let target = self.right_target(cx);
         let edge_offset = self.eval_resize_edge_bounce(
             self.right_edge_bounce,
