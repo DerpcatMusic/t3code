@@ -76,6 +76,8 @@ mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
 pub(crate) mod spaces;
+mod t3_chrome;
+mod t3_sidebar;
 use side_chats::SideChatTab;
 mod tabs;
 mod voice_stage;
@@ -1977,6 +1979,7 @@ pub struct Shell {
     project_crumb_menu: popover::Popup<()>,
     command_palette: Option<command_palette::CommandPalette>,
     pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
+    pending_t3_route: Option<crate::browser::T3SettingsRoute>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
     /// Hover/drag + scroll-linger state of the dropdown's floating rail.
@@ -1999,6 +2002,10 @@ pub struct Shell {
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     sidebar_t3_section: zeron_t3::SidebarSection,
+    t3_settled_shown: usize,
+    t3_settled_filter: Option<String>,
+    t3_panel: actions_ui::T3PanelState,
+    t3_panel_open: Option<bool>,
     /// In-flight reorder for the pinned section only.
     pinned_session_drag: Option<PinnedSessionDragState>,
     pinned_session_drag_generation: u64,
@@ -2358,8 +2365,7 @@ impl Shell {
         });
         let panels = SessionPanels {
             defaults: ChatPanels {
-                changes_open: std::env::var_os("ZERON_T3_CONNECTION").is_some()
-                    && settings.right_pane_open,
+                changes_open: false,
                 ..Default::default()
             },
             ..Default::default()
@@ -2391,7 +2397,10 @@ impl Shell {
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
-            sidebar_collapsed_groups: std::collections::HashSet::new(),
+            sidebar_collapsed_groups: std::collections::HashSet::from([
+                t3_sidebar::SETTLED_COLLAPSE_KEY.into(),
+                t3_sidebar::SNOOZED_COLLAPSE_KEY.into(),
+            ]),
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -2465,6 +2474,7 @@ impl Shell {
             project_crumb_menu: popover::Popup::default(),
             command_palette: None,
             pending_workspace_command: None,
+            pending_t3_route: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
             sidebar_view_menu: popover::Popup::default(),
@@ -2475,6 +2485,10 @@ impl Shell {
             chat_hover_resync: false,
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_t3_section: zeron_t3::SidebarSection::Active,
+            t3_settled_shown: t3_sidebar::SETTLED_PAGE_SIZE,
+            t3_settled_filter: None,
+            t3_panel: actions_ui::T3PanelState::default(),
+            t3_panel_open: None,
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
@@ -2821,6 +2835,9 @@ impl Shell {
                 {
                     let body = match connectivity {
                         zeron_proto::ConnectivityState::Offline => "Your device is offline",
+                        _ if std::env::var_os("ZERON_T3_CONNECTION").is_some() => {
+                            "Reconnecting to T3"
+                        }
                         _ => "Zeron is trying to reconnect",
                     };
                     crate::notify::post("Connection unavailable", body, None);
@@ -3063,11 +3080,11 @@ impl Shell {
 
     /// Whether the right pane shows. NOT gated on git any more: the pane is
     /// a surface HOST now (terminals work in any space), so only the Git
-    /// surface rows check `space_git_detected`. Still hidden on the
-    /// new-session canvas, where the titlebar carries no toggle to close it
-    /// again (an earlier user request).
+    /// surface rows check `space_git_detected`. T3 utility browsers also own
+    /// canvas tabs so Connect login is available before the first chat.
     fn right_pane_open(&self, cx: &App) -> bool {
-        !self.active_chat.is_empty() && self.panels.get(&self.panel_key(cx)).changes_open
+        (!self.active_chat.is_empty() || std::env::var_os("ZERON_T3_CONNECTION").is_some())
+            && self.panels.get(&self.panel_key(cx)).changes_open
     }
 
     /// The current chat's terminal flag (per-session, in-memory).
@@ -3130,7 +3147,9 @@ impl Shell {
     /// already in the requested state, so programmatic opens (a file, a
     /// browser link, a subagent chip) never close a pane the user has open.
     fn set_surfaces_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.active_chat.is_empty() || self.right_pane_open(cx) == open {
+        if (self.active_chat.is_empty() && std::env::var_os("ZERON_T3_CONNECTION").is_none())
+            || self.right_pane_open(cx) == open
+        {
             return;
         }
         // Reverse from the visible width when toggled during an animation.
@@ -3668,7 +3687,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_chat.is_empty() {
+        if self.active_chat.is_empty() && std::env::var_os("ZERON_T3_CONNECTION").is_none() {
             return;
         }
         let key = self.panel_key(cx);
@@ -3683,7 +3702,9 @@ impl Shell {
         let browser = cx.new(|cx| {
             crate::browser::BrowserSurface::new(self.browser_context.clone(), remote, window, cx)
         });
-        if let Some(handle) = self.state.read(cx).engine().cloned() {
+        if !self.active_chat.is_empty()
+            && let Some(handle) = self.state.read(cx).engine().cloned()
+        {
             let chat_id = self.active_chat.clone();
             browser.update(cx, |browser, cx| {
                 browser.watch_previews(handle, chat_id, cx)
@@ -4083,6 +4104,10 @@ impl Shell {
                 title,
                 frozen,
             } => {
+                if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+                    self.open_chat(doc_id.clone(), cx);
+                    return;
+                }
                 self.add_subagent_surface(
                     chat_id.clone(),
                     doc_id.clone(),
@@ -4966,6 +4991,57 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+            let route = match section {
+                SettingsSection::Devices | SettingsSection::Agents => {
+                    Some(crate::browser::T3SettingsRoute::Connections)
+                }
+                SettingsSection::Harnesses => Some(crate::browser::T3SettingsRoute::Providers),
+                _ => None,
+            };
+            if let Some(route) = route {
+                let (title, detail) = if matches!(route, crate::browser::T3SettingsRoute::Providers)
+                {
+                    (
+                        "Open T3 providers",
+                        "Manage provider connections and models with T3.",
+                    )
+                } else {
+                    (
+                        "Open T3 Connect",
+                        "Sign in, pair devices, and manage remote connections with T3.",
+                    )
+                };
+                return div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(Theme::SPACE_MD))
+                    .child(detail)
+                    .child(
+                        crate::settings::widgets::text_action(
+                            &Theme::of(cx).for_settings_surface(),
+                            crate::settings::widgets::ActionTone::Outlined,
+                            title,
+                        )
+                        .id("open-t3-settings")
+                        .role(gpui::Role::Button)
+                        .aria_label(title)
+                        .tab_index(0)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_t3_settings_route(route, window, cx)
+                        }))
+                        .on_key_down(cx.listener(
+                            move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    this.open_t3_settings_route(route, window, cx);
+                                    cx.stop_propagation();
+                                }
+                            },
+                        )),
+                    )
+                    .into_any_element();
+            }
+        }
         match section {
             SettingsSection::Devices => {
                 if self.devices_page.is_none() {
@@ -6411,6 +6487,12 @@ impl Shell {
     }
 
     fn start_sign_in(&mut self, cx: &mut Context<Self>) {
+        if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+            self.close_user_menu(cx);
+            self.pending_t3_route = Some(crate::browser::T3SettingsRoute::Account);
+            cx.notify();
+            return;
+        }
         let scope = self.state.read(cx).workspace_scope;
         if scope == Some(WorkspaceScope::Development) {
             return;
@@ -8474,6 +8556,9 @@ impl Shell {
     }
 
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+            return self.render_t3_sidebar(theme, cx);
+        }
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
         }) {
@@ -9263,6 +9348,9 @@ impl Shell {
     /// sit in one position. Local runtimes advertise their storage boundary
     /// and offer sync; synced runtimes offer sign-out.
     fn render_sidebar_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+            return self.render_t3_footer(theme, cx);
+        }
         let (user_line, menu_identity) = {
             let state = self.state.read(cx);
             sidebar_account_identity(state.workspace_scope, self.sync_flow, state.auth_user())
@@ -10696,36 +10784,44 @@ impl Shell {
                 ),
             )));
         let term_h = self.terminal_geometry.get().height;
-        let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
-            if artwork_frame.active {
-                window.request_animation_frame();
-            }
-            let width = (self.viewport_width - self.sidebar_now()).max(0.0);
-            let bounds = self.composer.read(cx).surface_bounds();
-            let opacity = new_thread_background_opacity(theme.is_frost());
-            div()
-                .absolute()
-                .inset_0()
-                .child(new_thread_background(
-                    artwork_frame.previous,
-                    artwork_frame.previous_adjustment,
-                    self.viewport_height,
-                    width,
-                    bounds.clone(),
-                    dock_frame.dissolve(),
-                    (1.0 - artwork_frame.mix) * opacity,
-                ))
-                .child(new_thread_background(
-                    artwork_frame.current,
-                    artwork_frame.current_adjustment,
-                    self.viewport_height,
-                    width,
-                    bounds,
-                    dock_frame.dissolve(),
-                    artwork_frame.mix * opacity,
-                ))
-                .into_any_element()
-        });
+        let keep_wallpaper = has_selection && std::env::var_os("ZERON_T3_CONNECTION").is_some();
+        let new_thread_background_layer = (!has_selection || dock_frame.active || keep_wallpaper)
+            .then(|| {
+                if artwork_frame.active {
+                    window.request_animation_frame();
+                }
+                let width = (self.viewport_width - self.sidebar_now()).max(0.0);
+                let bounds = self.composer.read(cx).surface_bounds();
+                let opacity = new_thread_background_opacity(theme.is_frost())
+                    * if keep_wallpaper { 0.35 } else { 1.0 };
+                let dissolve = if keep_wallpaper {
+                    0.0
+                } else {
+                    dock_frame.dissolve()
+                };
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(new_thread_background(
+                        artwork_frame.previous,
+                        artwork_frame.previous_adjustment,
+                        self.viewport_height,
+                        width,
+                        bounds.clone(),
+                        dissolve,
+                        (1.0 - artwork_frame.mix) * opacity,
+                    ))
+                    .child(new_thread_background(
+                        artwork_frame.current,
+                        artwork_frame.current_adjustment,
+                        self.viewport_height,
+                        width,
+                        bounds,
+                        dissolve,
+                        artwork_frame.mix * opacity,
+                    ))
+                    .into_any_element()
+            });
 
         // Content outlet: selected chat → transcript; nothing selected → the
         // centered new-thread composition; no spaces at all → the onboarding
@@ -11438,10 +11534,6 @@ impl Shell {
             .when(
                 !matches!(self.resolved_right_active(cx), RightSurface::SideChat(_)),
                 |el| el.pt(px(Theme::TITLEBAR_HEIGHT)),
-            )
-            .when(
-                std::env::var_os("ZERON_T3_CONNECTION").is_some() && !self.active_chat.is_empty(),
-                |el| el.child(self.render_t3_project_panel(cx)),
             )
             .child(div().flex_1().min_h_0().child(content));
         let target = self.right_target(cx);
@@ -12920,6 +13012,9 @@ fn header_icon_button_with(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(route) = self.pending_t3_route.take() {
+            self.open_t3_settings_route(route, window, cx);
+        }
         let active_files_key = self.panel_key(cx);
         let hidden_explorers = self
             .files
@@ -13419,7 +13514,7 @@ impl Render for Shell {
                     viewport - self.files_reserved_width(cx),
                     self.sidebar_target(),
                     right_target_width,
-                );
+                ) - self.t3_panel_rail_width(cx);
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
@@ -13522,6 +13617,14 @@ impl Render for Shell {
                     .overflow_hidden()
                     .opacity(under_stage)
                     .child(main)
+                    .when(self.t3_panel_rail_width(cx) > 0.0, |el| {
+                        el.child(
+                            div()
+                                .w(px(self.t3_panel_rail_width(cx)))
+                                .h_full()
+                                .flex_none(),
+                        )
+                    })
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
@@ -13607,6 +13710,7 @@ impl Render for Shell {
                             .opacity(under_stage)
                             .child(title_bar),
                     )
+                    .children(self.render_t3_floating_panel(cx))
                     // The stage covers the conversation's titlebar but never
                     // the cluster: the sidebar toggle and navigation stay live.
                     .children(voice_stage)

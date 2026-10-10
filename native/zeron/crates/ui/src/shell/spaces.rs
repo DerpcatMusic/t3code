@@ -2030,13 +2030,13 @@ pub(super) fn pinned_drag_snapshot_is_valid(
     snapshot_ids.iter().any(|id| id == dragged_id) && snapshot_ids == current_ids
 }
 
-struct ActiveChatRow {
-    status: ChatIndicator,
-    chat: zeron_proto::Chat,
-    folder: String,
-    branch: Option<String>,
-    change_request: Option<zeron_proto::ChangeRequestSummary>,
-    group: Option<(String, String)>,
+pub(super) struct ActiveChatRow {
+    pub(super) status: ChatIndicator,
+    pub(super) chat: zeron_proto::Chat,
+    pub(super) folder: String,
+    pub(super) branch: Option<String>,
+    pub(super) change_request: Option<zeron_proto::ChangeRequestSummary>,
+    pub(super) group: Option<(String, String)>,
 }
 
 pub(super) fn compare_sidebar_chats(
@@ -2211,7 +2211,7 @@ pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
 }
 
 /// `icon` leads the label — a project group's icon, which its rows then omit.
-fn sidebar_disclosure_header(
+pub(super) fn sidebar_disclosure_header(
     theme: &Theme,
     icon: Option<AnyElement>,
     label: SharedString,
@@ -3019,7 +3019,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn finish_t3_status_transfer(
+    pub(super) fn finish_t3_status_transfer(
         &mut self,
         payload: &SidebarSessionDrag,
         section: &'static str,
@@ -4407,6 +4407,9 @@ impl Shell {
     /// and local-device promotion. Jump shortcuts and session cycling read
     /// this projection so keyboard order never drifts from the screen.
     pub(super) fn sidebar_visible_order(&self, cx: &Context<Self>) -> Vec<String> {
+        if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+            return self.t3_sidebar_visible_order(cx);
+        }
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
@@ -4667,7 +4670,7 @@ impl Shell {
     }
 
     /// A device/project group's key in `sidebar_collapsed_groups`.
-    fn sidebar_group_collapse_key(&self, group: &str) -> String {
+    pub(super) fn sidebar_group_collapse_key(&self, group: &str) -> String {
         let organization = match self.settings.sidebar_organization {
             SidebarOrganization::ByStatus => "status",
             SidebarOrganization::ByDevice => "device",
@@ -4775,7 +4778,7 @@ impl Shell {
     }
 
     /// Shared metadata and visibility settings for active and archived sessions.
-    fn sidebar_chat_data(
+    pub(super) fn sidebar_chat_data(
         &self,
         status: ChatIndicator,
         chat: zeron_proto::Chat,

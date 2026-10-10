@@ -8,7 +8,9 @@ use linux as native;
 #[cfg(target_os = "macos")]
 use macos as native;
 pub mod model;
+mod t3_settings;
 mod view;
+pub use t3_settings::T3SettingsRoute;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use gpui::{
@@ -67,7 +69,7 @@ pub enum BrowserEvent {
     Close,
 }
 
-/// A window/profile's ephemeral website data, allocated on first navigation.
+/// A window/profile's native browser worker. Ordinary website data stays ephemeral.
 #[derive(Clone, Default)]
 pub struct BrowserContext {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -85,6 +87,7 @@ pub struct BrowserSurface {
     validation: Option<String>,
     remote: bool,
     document: bool,
+    t3_settings: bool,
     previews: zeron_proto::PreviewSnapshot,
     previews_loading: bool,
     previews_task: Option<gpui::Task<()>>,
@@ -164,6 +167,7 @@ impl BrowserSurface {
             validation: None,
             remote,
             document: false,
+            t3_settings: false,
             previews: zeron_proto::PreviewSnapshot::default(),
             previews_loading: true,
             previews_task: None,
@@ -329,6 +333,13 @@ impl BrowserSurface {
                 return;
             }
         };
+        // A normal browser navigation must not inherit account cookies.
+        if self.t3_settings {
+            let presentation = self.presentation;
+            self.close(cx);
+            self.presentation = presentation;
+            self.t3_settings = false;
+        }
         self.validation = None;
         self.address
             .update(cx, |input, cx| input.set_text(url.clone(), cx));
@@ -395,14 +406,64 @@ impl BrowserSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(origin) = session["origin"].as_str() else {
-            return;
-        };
-        let url = format!("{origin}/settings");
-        self.navigate(&url, window, cx);
-        if let Some(native) = &self.native {
-            native.command(serde_json::json!({"cmd":"load-session","url":url,"origin":origin,"cookieName":session["cookieName"],"accessToken":session["accessToken"]}));
+        self.open_t3_settings_route(session, T3SettingsRoute::General, window, cx);
+    }
+
+    /// Opens the real T3 web controls. Account uses the settings sidebar's Clerk
+    /// sign-in/profile modal; Connections includes host link/unlink and pairing.
+    #[cfg(target_os = "linux")]
+    pub fn open_t3_settings_route(
+        &mut self,
+        session: serde_json::Value,
+        route: T3SettingsRoute,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = (|| {
+            let host = t3_settings::HostSession::parse(&session, route)
+                .ok_or("Could not authenticate the T3 settings session.")?;
+            let profile = crate::settings::t3_browser_profile_dir(cx)
+                .ok_or("The native settings profile is not available.")?;
+            t3_settings::prepare_profile(&profile)?;
+            let mut native = native::NativePage::new_t3_settings(
+                window,
+                &self.context.data,
+                self.native_tx.clone(),
+                &profile,
+            )
+            .map_err(|_| "Could not open the T3 settings browser.")?;
+            native.command(serde_json::json!({"cmd":"appearance","dark":crate::theme::Theme::of(cx).appearance.is_dark()}));
+            // Do not navigate before the host cookie is installed: that races
+            // T3's unauthenticated page/session initialization.
+            native
+                .load_t3_session(&host)
+                .map_err(|_| "Could not authenticate the T3 settings session.")?;
+            let presentation = self.presentation;
+            self.close(cx);
+            self.presentation = presentation;
+            native.present(presentation);
+            self.native = Some(native);
+            self.t3_settings = true;
+            self.document = false;
+            self.page = PageState {
+                url: Some(host.url.clone()),
+                title: host.title.into(),
+                loading: true,
+                ..Default::default()
+            };
+            self.address
+                .update(cx, |input, cx| input.set_text(host.url, cx));
+            self.address_edited = false;
+            self.validation = None;
+            self.clear_favicon(cx);
+            window.focus(&self.focus, cx);
+            Ok::<(), &str>(())
+        })();
+        if let Err(error) = result {
+            self.validation = Some(error.into());
         }
+        cx.emit(BrowserEvent::Changed);
+        cx.notify();
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -428,6 +489,11 @@ impl BrowserSurface {
     }
 
     fn open_external(&self, cx: &mut Context<Self>) {
+        // System browsers do not share this profile or its host session. Never
+        // export an in-progress account redirect (or bootstrap token) to them.
+        if self.t3_settings {
+            return;
+        }
         if let Some(url) = self
             .page
             .url

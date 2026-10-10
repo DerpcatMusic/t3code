@@ -9,6 +9,117 @@ use crate::project_actions::{
     draft_from_action, preferred_action, show_action_label,
 };
 
+const PANEL_PAGE_SIZE: usize = 5;
+
+pub(super) struct T3PanelState {
+    chat_id: String,
+    host_menu: bool,
+    editor_menu: bool,
+    scripts_open: bool,
+    lineage_open: bool,
+    previous_open: bool,
+    scripts_page: usize,
+    lineage_page: usize,
+    previous_page: usize,
+    stopping_child: Option<String>,
+}
+
+impl Default for T3PanelState {
+    fn default() -> Self {
+        Self {
+            chat_id: String::new(),
+            host_menu: false,
+            editor_menu: false,
+            scripts_open: false,
+            lineage_open: true,
+            previous_open: false,
+            scripts_page: 0,
+            lineage_page: 0,
+            previous_page: 0,
+            stopping_child: None,
+        }
+    }
+}
+
+fn panel_page(count: usize, page: usize) -> std::ops::Range<usize> {
+    let start = page.min(count.saturating_sub(1) / PANEL_PAGE_SIZE) * PANEL_PAGE_SIZE;
+    start..(start + PANEL_PAGE_SIZE).min(count)
+}
+
+fn agent_provider_icon(driver: &str) -> &'static str {
+    match zeron_t3::projection::harness(driver) {
+        Some("codex") => icons::OPENAI_MARK,
+        Some("claude-code") => icons::CLAUDE_MARK,
+        Some("cursor") => icons::CURSOR_MARK,
+        Some("grok") => icons::GROK_MARK,
+        Some("pi") => icons::PI_MARK,
+        Some("opencode") => icons::OPENCODE_MARK,
+        Some("devin") => icons::DEVIN_MARK,
+        Some("hermes") => icons::HERMES_MARK,
+        Some("antigravity") => icons::ANTIGRAVITY_MARK,
+        _ => icons::BOT,
+    }
+}
+
+fn panel_control(theme: &Theme, id: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
+    let id: SharedString = id.into();
+    div()
+        .id(id)
+        .min_w(px(0.0))
+        .h(px(30.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(7.0))
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover(|s| s.bg(crate::theme::ink(0.05)))
+}
+
+fn panel_duration(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1000;
+    if seconds >= 3600 {
+        format!("{}h {}m", seconds / 3600, seconds % 3600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+#[cfg(test)]
+mod t3_panel_logic_tests {
+    use super::*;
+
+    #[test]
+    fn pages_are_bounded_and_clamp_after_remote_removal() {
+        assert_eq!(panel_page(0, 99), 0..0);
+        assert_eq!(panel_page(50, 0), 0..5);
+        assert_eq!(panel_page(50, 9), 45..50);
+        assert_eq!(panel_page(6, 9), 5..6);
+        assert_eq!(panel_page(4, 1), 0..4);
+    }
+
+    #[test]
+    fn provider_marks_follow_driver_not_account_identifier() {
+        assert_eq!(agent_provider_icon("pi"), icons::PI_MARK);
+        assert_eq!(agent_provider_icon("codex"), icons::OPENAI_MARK);
+        assert_eq!(agent_provider_icon("claude-code"), icons::CLAUDE_MARK);
+        assert_eq!(agent_provider_icon("cursor"), icons::CURSOR_MARK);
+        assert_eq!(agent_provider_icon("opencode"), icons::OPENCODE_MARK);
+        assert_eq!(agent_provider_icon("team-account"), icons::BOT);
+    }
+
+    #[test]
+    fn duration_uses_compact_units_without_inventing_a_status() {
+        assert_eq!(panel_duration(0), "0s");
+        assert_eq!(panel_duration(61_000), "1m 1s");
+        assert_eq!(panel_duration(3_661_000), "1h 1m");
+    }
+}
+
 #[derive(Clone)]
 struct ProjectActionContext {
     key: ProjectActionsKey,
@@ -557,25 +668,39 @@ impl Shell {
     }
 
     fn open_t3_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_t3_settings_route(crate::browser::T3SettingsRoute::General, window, cx);
+    }
+
+    pub(super) fn open_t3_settings_route(
+        &mut self,
+        route: crate::browser::T3SettingsRoute,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
         cx.spawn_in(window, async move |this, cx| {
-            let result = engine
-                .client()
-                .call("T3BrowserBootstrap", serde_json::json!({}))
-                .await;
+            let result = crate::attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                "T3BrowserBootstrap",
+                serde_json::json!({}),
+                Duration::from_secs(30),
+            )
+            .await;
             this.update_in(cx, |shell, window, cx| match result {
                 Ok(session) => {
+                    shell.close_settings(cx);
+                    shell.route = Route::Chat;
+                    shell.t3_panel_open = Some(false);
                     shell.set_surfaces_open(true, cx);
-                    let shared = std::mem::take(&mut shell.browser_context);
                     shell.add_browser_surface(None, window, cx);
-                    shell.browser_context = shared;
                     if let RightSurface::Browser(id) = shell.resolved_right_active(cx) {
                         #[cfg(target_os = "linux")]
                         if let Some(browser) = shell.browsers.get(&id) {
                             browser.update(cx, |browser, cx| {
-                                browser.open_t3_settings(session, window, cx)
+                                browser.open_t3_settings_route(session, route, window, cx)
                             });
                         }
                     }
@@ -590,8 +715,160 @@ impl Shell {
         .detach();
     }
 
+    fn stop_t3_panel_agent(&mut self, child: String, cx: &mut Context<Self>) {
+        if self.t3_panel.stopping_child.is_some() {
+            return;
+        }
+        let allowed = self
+            .state
+            .read(cx)
+            .t3_details
+            .get(&self.active_chat)
+            .is_some_and(|details| {
+                details
+                    .agents
+                    .iter()
+                    .any(|a| a.child_thread_id.as_deref() == Some(&child) && a.can_stop())
+            });
+        if !allowed {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.t3_panel.stopping_child = Some(child.clone());
+        let parent = self.active_chat.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    "T3StopAgent",
+                    serde_json::json!({"chatId":parent,"childThreadId":child}),
+                )
+                .await;
+            this.update(cx, |shell, cx| {
+                shell.t3_panel.stopping_child = None;
+                if let Err(error) = result {
+                    shell.sidebar_notice = Some(format!("Could not stop agent: {error}").into());
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_t3_agent_row(
+        &mut self,
+        agent: &zeron_t3::projection::AgentDetails,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use zeron_t3::projection::AgentStatus;
+        let theme = Theme::of(cx).clone();
+        let failed = agent.status == AgentStatus::Failed;
+        let tone = if failed {
+            theme.danger
+        } else if agent.status.is_active() {
+            theme.accent
+        } else {
+            theme.text_muted
+        };
+        let title = zeron_t3::projection::agent_display_title(&agent.title);
+        let child = agent.child_thread_id.clone();
+        let can_open = child.is_some() && !agent.missing;
+        let mut content = panel_control(&theme, format!("t3-agent-open-{}", agent.id))
+            .flex_1()
+            .child(
+                icon(agent_provider_icon(&agent.driver))
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .child(SharedString::from(title.clone())),
+            )
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .text_color(tone)
+                    .child(agent.status.label()),
+            )
+            .when_some(
+                agent.elapsed_ms(Utc::now().timestamp_millis()),
+                |el, elapsed| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(10.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(panel_duration(elapsed))),
+                    )
+                },
+            )
+            .tooltip(crate::settings::widgets::text_tooltip(if agent.missing {
+                format!("{title} — related thread unavailable")
+            } else if child.is_none() {
+                format!("{title} — waiting for a child thread")
+            } else {
+                format!(
+                    "Open {title} · {} · {}{}",
+                    agent.provider_instance_id,
+                    agent.driver,
+                    agent
+                        .model
+                        .as_ref()
+                        .map(|model| format!(" · {model}"))
+                        .unwrap_or_default()
+                )
+            }));
+        if can_open {
+            content = content.on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(child) = &child {
+                    this.open_chat(child.clone(), cx);
+                }
+            }));
+        } else {
+            content = content.cursor_default().opacity(0.55);
+        }
+        let mut row = div().flex().items_center().child(content);
+        if agent.can_stop()
+            && let Some(child) = &agent.child_thread_id
+        {
+            let child = child.clone();
+            let busy = self.t3_panel.stopping_child.is_some();
+            row = row.child(
+                panel_control(&theme, format!("t3-agent-stop-{}", agent.id))
+                    .flex_none()
+                    .text_color(theme.danger)
+                    .tooltip(crate::settings::widgets::text_tooltip(format!(
+                        "Stop {title}"
+                    )))
+                    .when(busy, |el| el.cursor_default().opacity(0.45))
+                    .when(!busy, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            this.stop_t3_panel_agent(child.clone(), cx)
+                        }))
+                    })
+                    .child(icon(icons::STOP).size(px(12.0))),
+            );
+        }
+        row.into_any_element()
+    }
+
     pub(super) fn render_t3_project_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_project_actions(cx);
+        if self.t3_panel.chat_id != self.active_chat {
+            let stopping_child = self.t3_panel.stopping_child.take();
+            self.t3_panel = T3PanelState {
+                chat_id: self.active_chat.clone(),
+                stopping_child,
+                ..Default::default()
+            };
+        }
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let host = state
@@ -604,125 +881,569 @@ impl Shell {
             .and_then(|chat| chat.cwd.clone())
             .unwrap_or_default();
         let details = state.t3_details.get(&self.active_chat).cloned();
-        let git = details
-            .as_ref()
-            .and_then(|d| d.git.as_ref())
-            .is_some_and(|g| g.branch.is_some());
         let actions = self
             .project_actions
             .visible_snapshot()
             .map(|s| s.actions.clone())
             .unwrap_or_default();
-        let row = |id: &'static str, icon_path: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .w_full()
-                .h(px(34.0))
-                .px(px(12.0))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .rounded(px(7.0))
-                .text_size(crate::typography::ui_rems(13.0))
-                .text_color(theme.text)
-                .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
-                .child(icon(icon_path).size(px(15.0)).text_color(theme.text_muted))
-                .child(label)
-        };
+        let can_run = self
+            .project_actions
+            .active_status()
+            .is_some_and(ProjectActionsStatus::can_run);
+        let action_key = self.project_actions.active.clone();
         let mut card = div()
             .w_full()
             .flex()
             .flex_col()
-            .p(px(6.0))
+            .p(px(8.0))
+            .gap(px(2.0))
             .rounded(px(16.0))
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_card)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .text_color(theme.text_muted)
-                    .child(icon(icons::MONITOR).size(px(14.0)))
-                    .child(SharedString::from(host)),
-            )
-            .child(
-                div()
-                    .px(px(12.0))
-                    .pb(px(5.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .truncate()
-                    .child(SharedString::from(path)),
-            )
-            .child(
-                row("t3-open-editor", icons::TERMINAL, "Open in Zed").on_click(
-                    cx.listener(|this, _, _, cx| this.t3_project_command("T3OpenInEditor", cx)),
+            .bg(theme.surface_card);
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    panel_control(&theme, "t3-panel-host")
+                        .flex_1()
+                        .tooltip(crate::settings::widgets::text_tooltip(
+                            "Environment and devices",
+                        ))
+                        .child(
+                            icon(icons::MONITOR)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .child(SharedString::from(host)),
+                        )
+                        .child(icon(icons::ALT_ARROW_DOWN).size(px(10.0)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.t3_panel.host_menu = !this.t3_panel.host_menu;
+                            this.t3_panel.editor_menu = false;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    panel_control(&theme, "t3-panel-editor")
+                        .tooltip(crate::settings::widgets::text_tooltip("Open project"))
+                        .child(
+                            icon(icons::TERMINAL)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child("Open")
+                        .child(icon(icons::ALT_ARROW_DOWN).size(px(10.0)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.t3_panel.editor_menu = !this.t3_panel.editor_menu;
+                            this.t3_panel.host_menu = false;
+                            cx.notify();
+                        })),
                 ),
-            )
-            .child(
-                row("t3-add-script", icons::PLUS, "Add project script").on_click(
-                    cx.listener(|this, _, _, cx| this.open_project_action_editor(None, None, cx)),
+        );
+        if self.t3_panel.host_menu {
+            card = card
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .truncate()
+                        .child(SharedString::from(path.clone()))
+                        .tooltip(crate::settings::widgets::text_tooltip(path.clone())),
+                )
+                .child(
+                    panel_control(&theme, "t3-panel-connections")
+                        .child(icon(icons::MONITOR).size(px(14.0)))
+                        .child("Devices and connections")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_t3_settings_route(
+                                crate::browser::T3SettingsRoute::Connections,
+                                window,
+                                cx,
+                            );
+                        })),
+                )
+                .child(
+                    panel_control(&theme, "t3-panel-providers")
+                        .child(icon(icons::BOT).size(px(14.0)))
+                        .child("Providers")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_t3_settings_route(
+                                crate::browser::T3SettingsRoute::Providers,
+                                window,
+                                cx,
+                            );
+                        })),
+                );
+        }
+        if self.t3_panel.editor_menu {
+            let copy_path = path.clone();
+            card = card
+                .child(
+                    panel_control(&theme, "t3-open-editor")
+                        .child(icon(icons::TERMINAL).size(px(14.0)))
+                        .child("Open in Zed")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.t3_panel.editor_menu = false;
+                            this.t3_project_command("T3OpenInEditor", cx);
+                        })),
+                )
+                .child(
+                    panel_control(&theme, "t3-project-terminal")
+                        .child(icon(icons::TERMINAL).size(px(14.0)))
+                        .child("Terminal")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.t3_panel.editor_menu = false;
+                            this.add_terminal_surface(cx);
+                        })),
+                )
+                .child(
+                    panel_control(&theme, "t3-copy-project-path")
+                        .child(icon(icons::COPY).size(px(14.0)))
+                        .child("Copy project path")
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                copy_path.clone(),
+                            ));
+                        }),
+                );
+        }
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .child(
+                    panel_control(&theme, "t3-panel-scripts")
+                        .flex_1()
+                        .child(
+                            icon(icons::TERMINAL)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from(format!(
+                            "Project scripts · {}",
+                            actions.len()
+                        )))
+                        .child(
+                            icon(if self.t3_panel.scripts_open {
+                                icons::ALT_ARROW_UP
+                            } else {
+                                icons::ALT_ARROW_DOWN
+                            })
+                            .size(px(10.0)),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.t3_panel.scripts_open = !this.t3_panel.scripts_open;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    panel_control(&theme, "t3-add-script")
+                        .child(icon(icons::PLUS).size(px(13.0)))
+                        .tooltip(crate::settings::widgets::text_tooltip("Add project script"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_project_action_editor(None, None, cx)
+                        })),
                 ),
-            );
-        for action in actions.into_iter().take(4) {
-            let Some(key) = self.project_actions.active.clone() else {
-                break;
+        );
+        if self.t3_panel.scripts_open {
+            let status = self.project_actions.active_status().cloned();
+            let script_notice = match &status {
+                Some(ProjectActionsStatus::Idle | ProjectActionsStatus::Loading) => {
+                    Some("Loading project scripts…")
+                }
+                Some(ProjectActionsStatus::Unavailable { .. }) => {
+                    Some("Project scripts could not load.")
+                }
+                Some(ProjectActionsStatus::Unsupported) => {
+                    Some("Project scripts are unavailable on this server.")
+                }
+                Some(ProjectActionsStatus::Saving(_)) => Some("Saving project script…"),
+                _ if actions.is_empty() => Some("Add a script to run it in this project."),
+                _ => None,
             };
-            let label = action.name.clone();
+            if let Some(notice) = script_notice {
+                card = card.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(notice),
+                );
+            }
+            if let Some(ProjectActionsStatus::Unavailable { message, .. }) = status {
+                card = card.child(
+                    panel_control(&theme, "t3-scripts-retry")
+                        .child("Retry loading scripts")
+                        .tooltip(crate::settings::widgets::text_tooltip(message))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(context) = this.project_action_context(cx) {
+                                this.refresh_project_actions(context, cx);
+                            }
+                        })),
+                );
+            }
+            for index in panel_page(actions.len(), self.t3_panel.scripts_page) {
+                let action = actions[index].clone();
+                let key = action_key.clone();
+                let edit_action = action.clone();
+                card = card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(
+                            panel_control(&theme, format!("t3-script-{}", action.id))
+                                .flex_1()
+                                .child(
+                                    icon(action_icon(action.icon))
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .truncate()
+                                        .child(SharedString::from(action.name.clone())),
+                                )
+                                .tooltip(crate::settings::widgets::text_tooltip(
+                                    action.command.clone(),
+                                ))
+                                .when(!can_run, |el| el.cursor_default().opacity(0.45))
+                                .when(can_run, |el| {
+                                    el.on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(key) = &key {
+                                            this.run_project_action(key, action.clone(), cx);
+                                        }
+                                    }))
+                                }),
+                        )
+                        .child(
+                            panel_control(&theme, format!("t3-script-edit-{}", edit_action.id))
+                                .child(icon(icons::SETTINGS).size(px(12.0)))
+                                .tooltip(crate::settings::widgets::text_tooltip(
+                                    "Edit project script",
+                                ))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_project_action_editor(
+                                        Some(edit_action.clone()),
+                                        None,
+                                        cx,
+                                    )
+                                })),
+                        ),
+                );
+            }
+            card = card.child(self.render_t3_panel_pager(
+                "scripts",
+                actions.len(),
+                self.t3_panel.scripts_page,
+                cx,
+            ));
+        }
+        card = card.child(div().h(px(1.0)).mx(px(8.0)).my(px(5.0)).bg(theme.border));
+        if let Some(details) = &details {
+            if let Some(branch) = details
+                .git
+                .as_ref()
+                .and_then(|g| g.branch.as_ref())
+                .or(details.branch.as_ref())
+            {
+                let copy_branch = branch.clone();
+                card = card.child(
+                    panel_control(&theme, "t3-project-branch")
+                        .child(
+                            icon(icons::GIT_BRANCH)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .child(SharedString::from(branch.clone())),
+                        )
+                        .child(
+                            icon(icons::COPY)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .tooltip(crate::settings::widgets::text_tooltip("Copy branch name"))
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                copy_branch.clone(),
+                            ))
+                        }),
+                );
+            }
+            if let Some(git) = &details.git {
+                card = card.child(
+                    panel_control(&theme, "t3-project-diff")
+                        .child(
+                            icon(icons::GIT_BRANCH)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(div().flex_1().child("Changes"))
+                        .child(
+                            div()
+                                .text_color(theme.success)
+                                .child(SharedString::from(format!("+{}", git.additions))),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.danger)
+                                .child(SharedString::from(format!("−{}", git.deletions))),
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.add_diff_surface(window, cx)),
+                        ),
+                );
+            } else {
+                card = card.child(
+                    panel_control(&theme, "t3-initialize-git")
+                        .child(icon(icons::GIT_BRANCH).size(px(14.0)))
+                        .child("Initialize Git")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.t3_project_command("T3InitializeGit", cx)
+                        })),
+                );
+            }
+            let active: Vec<_> = details
+                .agents
+                .iter()
+                .filter(|a| a.status.is_active())
+                .collect();
+            let previous: Vec<_> = details
+                .agents
+                .iter()
+                .filter(|a| !a.status.is_active())
+                .collect();
+            let running = active
+                .iter()
+                .filter(|a| a.status == zeron_t3::projection::AgentStatus::Running)
+                .count();
+            card = card
+                .child(div().h(px(1.0)).mx(px(8.0)).my(px(5.0)).bg(theme.border))
+                .child(
+                    panel_control(&theme, "t3-panel-lineage")
+                        .child(div().flex_1().child(SharedString::from(if running > 0 {
+                            format!("Lineage · {running} running")
+                        } else {
+                            "Lineage".into()
+                        })))
+                        .child(
+                            icon(if self.t3_panel.lineage_open {
+                                icons::ALT_ARROW_UP
+                            } else {
+                                icons::ALT_ARROW_DOWN
+                            })
+                            .size(px(10.0)),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.t3_panel.lineage_open = !this.t3_panel.lineage_open;
+                            cx.notify();
+                        })),
+                );
+            if self.t3_panel.lineage_open {
+                let total = details.related_threads.len() + active.len();
+                for index in panel_page(total, self.t3_panel.lineage_page) {
+                    if let Some(related) = details.related_threads.get(index) {
+                        let id = related.thread_id.clone();
+                        let missing = related.missing;
+                        let kind = match related.kind {
+                            zeron_t3::projection::RelationshipKind::Parent => "Parent",
+                            zeron_t3::projection::RelationshipKind::Fork => "Fork",
+                            zeron_t3::projection::RelationshipKind::Subagent => "Agent",
+                            zeron_t3::projection::RelationshipKind::Transfer => "Transfer",
+                        };
+                        card = card.child(
+                            panel_control(&theme, format!("t3-related-{id}"))
+                                .child(
+                                    icon(
+                                        related
+                                            .driver
+                                            .as_deref()
+                                            .map(agent_provider_icon)
+                                            .unwrap_or(icons::GIT_BRANCH),
+                                    )
+                                    .size(px(14.0)),
+                                )
+                                .child(div().flex_1().min_w(px(0.0)).truncate().child(
+                                    SharedString::from(
+                                        if related.kind
+                                            == zeron_t3::projection::RelationshipKind::Subagent
+                                        {
+                                            zeron_t3::projection::agent_display_title(
+                                                &related.title,
+                                            )
+                                        } else {
+                                            related.title.clone()
+                                        },
+                                    ),
+                                ))
+                                .child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .text_color(theme.text_muted)
+                                        .child(related.status.label()),
+                                )
+                                .tooltip(crate::settings::widgets::text_tooltip(if missing {
+                                    "This related thread is unavailable".to_owned()
+                                } else {
+                                    format!("Open {} conversation", kind.to_lowercase())
+                                }))
+                                .when(missing, |el| el.cursor_default().opacity(0.45))
+                                .when(!missing, |el| {
+                                    el.on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_chat(id.clone(), cx)
+                                    }))
+                                }),
+                        );
+                    } else {
+                        card = card.child(self.render_t3_agent_row(
+                            active[index - details.related_threads.len()],
+                            cx,
+                        ));
+                    }
+                }
+                if total == 0 {
+                    card = card.child(
+                        div()
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child("No related conversations or running agents."),
+                    );
+                }
+                card = card.child(self.render_t3_panel_pager(
+                    "lineage",
+                    total,
+                    self.t3_panel.lineage_page,
+                    cx,
+                ));
+            }
+            if !previous.is_empty() {
+                card = card.child(
+                    panel_control(&theme, "t3-panel-previous")
+                        .child(div().flex_1().child(SharedString::from(format!(
+                            "Previous agents · {}",
+                            previous.len()
+                        ))))
+                        .child(
+                            icon(if self.t3_panel.previous_open {
+                                icons::ALT_ARROW_UP
+                            } else {
+                                icons::ALT_ARROW_DOWN
+                            })
+                            .size(px(10.0)),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.t3_panel.previous_open = !this.t3_panel.previous_open;
+                            cx.notify();
+                        })),
+                );
+                if self.t3_panel.previous_open {
+                    for index in panel_page(previous.len(), self.t3_panel.previous_page) {
+                        card = card.child(self.render_t3_agent_row(previous[index], cx));
+                    }
+                    card = card.child(self.render_t3_panel_pager(
+                        "previous",
+                        previous.len(),
+                        self.t3_panel.previous_page,
+                        cx,
+                    ));
+                }
+            }
+        } else {
             card = card.child(
                 div()
-                    .id(SharedString::from(format!("t3-script-{}", action.id)))
-                    .w_full()
-                    .h(px(32.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .rounded(px(7.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.05)))
-                    .child(icon(icons::TERMINAL).size(px(14.0)))
-                    .child(SharedString::from(label))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.run_project_action(&key, action.clone(), cx)
-                    })),
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child("Loading project details…"),
             );
         }
-        card = card.child(div().h(px(1.0)).mx(px(12.0)).my(px(5.0)).bg(theme.border));
-        card = if git {
-            card.child(
-                row("t3-project-diff", icons::GIT_BRANCH, "Changes")
-                    .on_click(cx.listener(|this, _, window, cx| this.add_diff_surface(window, cx))),
-            )
-        } else {
-            card.child(
-                row("t3-initialize-git", icons::GIT_BRANCH, "Initialize Git").on_click(
-                    cx.listener(|this, _, _, cx| this.t3_project_command("T3InitializeGit", cx)),
-                ),
-            )
-        };
-        card = card
+        card.into_any_element()
+    }
+
+    fn render_t3_panel_pager(
+        &self,
+        group: &'static str,
+        total: usize,
+        page: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if total <= PANEL_PAGE_SIZE {
+            return div().into_any_element();
+        }
+        let theme = Theme::of(cx).clone();
+        let range = panel_page(total, page);
+        let current = range.start / PANEL_PAGE_SIZE;
+        div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(4.0))
             .child(
-                row("t3-project-terminal", icons::TERMINAL, "Terminal")
-                    .on_click(cx.listener(|this, _, _, cx| this.add_terminal_surface(cx))),
+                panel_control(&theme, format!("t3-{group}-previous"))
+                    .child(icon(icons::ALT_ARROW_LEFT).size(px(12.0)))
+                    .tooltip(crate::settings::widgets::text_tooltip("Previous page"))
+                    .when(current == 0, |el| el.cursor_default().opacity(0.35))
+                    .when(current > 0, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            let page = match group {
+                                "scripts" => &mut this.t3_panel.scripts_page,
+                                "previous" => &mut this.t3_panel.previous_page,
+                                _ => &mut this.t3_panel.lineage_page,
+                            };
+                            *page = current - 1;
+                            cx.notify();
+                        }))
+                    }),
             )
             .child(
-                row(
-                    "t3-project-settings",
-                    icons::SETTINGS,
-                    "Providers and devices",
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.open_t3_settings(window, cx))),
-            );
-        div().flex_none().p(px(12.0)).child(card).into_any_element()
+                div()
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!(
+                        "{}–{} of {total}",
+                        range.start + 1,
+                        range.end
+                    ))),
+            )
+            .child(
+                panel_control(&theme, format!("t3-{group}-next"))
+                    .child(icon(icons::ALT_ARROW_RIGHT).size(px(12.0)))
+                    .tooltip(crate::settings::widgets::text_tooltip("Next page"))
+                    .when(range.end == total, |el| el.cursor_default().opacity(0.35))
+                    .when(range.end < total, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            let page = match group {
+                                "scripts" => &mut this.t3_panel.scripts_page,
+                                "previous" => &mut this.t3_panel.previous_page,
+                                _ => &mut this.t3_panel.lineage_page,
+                            };
+                            *page = current + 1;
+                            cx.notify();
+                        }))
+                    }),
+            )
+            .into_any_element()
     }
 
     pub(super) fn render_project_actions_control(

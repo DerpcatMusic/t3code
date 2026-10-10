@@ -356,7 +356,8 @@ impl Shell {
         // the pane itself would sit under the drag region and never see a
         // click. Closed, it is just the stable open/close toggle. Hidden on
         // the new-session canvas (user request) — nothing to diff yet.
-        let right_pane_open = !on_canvas && self.right_pane_open(cx);
+        let right_pane_open = self.right_pane_open(cx);
+        let hide_canvas_controls = on_canvas && !right_pane_open;
         let takeover = right_pane_open && self.right_pane_expanded;
         // In takeover the title hides and the strip owns the whole band, so
         // the row's left inset pulls back to the sidebar seam — the title
@@ -389,16 +390,21 @@ impl Shell {
         // The title row's gaps are outside the fixed-width panel controls.
         let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
         let right_visible = self.right_visible_width(cx);
-        let widths = panel_titlebar_widths(
+        let mut widths = panel_titlebar_widths(
             right_visible,
             files_width,
             self.viewport_width - row_left - right_pad - gap_budget,
             right_pad,
         );
+        let t3_panel_toggle = self.render_t3_panel_toggle(cx);
+        if t3_panel_toggle.is_some() {
+            widths.files_controls += 32.0;
+            widths.surface_reveal = (widths.surface_reveal - 32.0).max(0.0);
+        }
         // The trailing strip always carries the explorer slot with its two
         // toggles; the surface tabs reveal to their left only while the surface
         // host is open.
-        let trailing_width = if on_canvas {
+        let trailing_width = if hide_canvas_controls {
             0.0
         } else {
             let surface = if right_pane_open {
@@ -429,7 +435,7 @@ impl Shell {
             - row_gap * 3.0)
             .max(0.0);
 
-        let trailing: Option<gpui::AnyElement> = if on_canvas {
+        let trailing: Option<gpui::AnyElement> = if hide_canvas_controls {
             None
         } else {
             let mut controls = div()
@@ -509,6 +515,7 @@ impl Shell {
                             .items_center()
                             .justify_end()
                             .gap(px(PANEL_TOGGLE_GAP))
+                            .children(t3_panel_toggle)
                             // No hairline here: the explorer column below is
                             // padded down by the titlebar height and its left
                             // border already runs through this band, so a

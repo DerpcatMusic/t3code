@@ -261,6 +261,53 @@ pub fn harness(driver: &str) -> Option<&'static str> {
     })
 }
 
+/// Matches the web display convention without changing a provider's identity or stored title.
+pub fn agent_display_title(title: &str) -> String {
+    let display = if title
+        .get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Subagent:"))
+    {
+        title[9..].trim_start()
+    } else {
+        title
+    };
+    if display
+        .strip_prefix("/root/")
+        .is_some_and(|suffix| !suffix.trim_end_matches('/').is_empty())
+        && let Some(name) = display
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+    {
+        return name
+            .split(|c: char| c == '_' || c.is_whitespace())
+            .filter(|word| !word.is_empty())
+            .map(|word| {
+                let mut chars = word.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    display.into()
+}
+
+fn default_runtime_mode() -> String {
+    "approval-required".into()
+}
+
+fn lineage_parent(thread: &Value) -> Option<&str> {
+    if thread["forkedFrom"]["type"] == "run" {
+        thread["forkedFrom"]["threadId"].as_str()
+    } else {
+        thread["lineage"]["parentThreadId"].as_str()
+    }
+}
+
 pub struct Projection {
     pub value: Value,
     sequence: u64,
@@ -270,11 +317,135 @@ pub struct Projection {
 #[serde(rename_all = "camelCase")]
 pub struct ThreadDetails {
     pub model: String,
+    #[serde(default = "default_runtime_mode")]
+    pub runtime_mode: String,
     pub branch: Option<String>,
     pub active_agents: usize,
     pub total_agents: usize,
     pub context_tokens: Option<u64>,
     pub git: Option<GitStats>,
+    #[serde(default)]
+    pub agents: Vec<AgentDetails>,
+    #[serde(default)]
+    pub related_threads: Vec<RelatedThreadDetails>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Idle,
+    Pending,
+    Preparing,
+    Queued,
+    Starting,
+    Running,
+    Waiting,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl AgentStatus {
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Pending
+                | Self::Preparing
+                | Self::Queued
+                | Self::Starting
+                | Self::Running
+                | Self::Waiting
+        )
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Pending => "Pending",
+            Self::Preparing => "Preparing",
+            Self::Queued => "Queued",
+            Self::Starting => "Starting",
+            Self::Running => "Running",
+            Self::Waiting => "Waiting",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+            Self::Interrupted => "Interrupted",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOrigin {
+    AppOwned,
+    ProviderNative,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDetails {
+    pub id: String,
+    pub child_thread_id: Option<String>,
+    pub title: String,
+    pub driver: String,
+    pub provider_instance_id: String,
+    pub model: Option<String>,
+    pub origin: AgentOrigin,
+    pub status: AgentStatus,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub progress: Option<String>,
+    pub result: Option<String>,
+    pub missing: bool,
+}
+
+impl AgentDetails {
+    pub fn can_stop(&self) -> bool {
+        self.origin == AgentOrigin::AppOwned
+            && !self.missing
+            && self.child_thread_id.is_some()
+            && self.started_at.is_some()
+            && self.status.is_active()
+    }
+
+    pub fn elapsed_ms(&self, now_ms: i64) -> Option<u64> {
+        let start = DateTime::parse_from_rfc3339(self.started_at.as_deref()?)
+            .ok()?
+            .timestamp_millis();
+        // Only a live authoritative status permits a running duration.
+        let end = match self.completed_at.as_deref() {
+            Some(end) => DateTime::parse_from_rfc3339(end).ok()?.timestamp_millis(),
+            None if self.status.is_active() => now_ms,
+            None => return None,
+        };
+        Some(end.saturating_sub(start).max(0) as u64)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipKind {
+    Parent,
+    Fork,
+    Subagent,
+    Transfer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelatedThreadDetails {
+    pub thread_id: String,
+    pub title: String,
+    pub kind: RelationshipKind,
+    pub status: AgentStatus,
+    pub driver: Option<String>,
+    pub missing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,22 +529,179 @@ impl Projection {
     }
 
     pub fn details(&self) -> Result<ThreadDetails> {
-        let agents = rows(&self.value, "subagents")?;
-        Ok(ThreadDetails {
-            model: text(&self.value["thread"]["modelSelection"], "model")?.into(),
-            branch: self.value["thread"]["branch"].as_str().map(Into::into),
-            active_agents: agents
+        self.details_from_sources(&[], &[])
+    }
+
+    /// Adapter-only enrichment; the server projection remains the source of agent records.
+    pub fn enrich_agent_shells(&mut self, shell: &Shell) {
+        let child_ids: std::collections::HashSet<_> = self.value["subagents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|agent| agent["childThreadId"].as_str())
+            .collect();
+        let children: Vec<_> = shell
+            .all_threads()
+            .filter(|thread| {
+                thread["deletedAt"].is_null()
+                    && thread["id"]
+                        .as_str()
+                        .is_some_and(|id| child_ids.contains(id))
+            })
+            .cloned()
+            .collect();
+        self.value["nativeAgentShells"] = json!(children);
+    }
+
+    /// Live shells precede archived shells; a renamed or restarted child wins over its task record.
+    pub fn details_with_shell(&self, shell: &Shell, providers: &[Value]) -> Result<ThreadDetails> {
+        self.details_from_sources(&shell.all_threads().collect::<Vec<_>>(), providers)
+    }
+
+    fn details_from_sources(
+        &self,
+        threads: &[&Value],
+        providers: &[Value],
+    ) -> Result<ThreadDetails> {
+        let owner = &self.value["thread"];
+        let owner_id = text(owner, "id")?;
+        let find = |id: &str| {
+            threads
                 .iter()
-                .filter(|agent| {
-                    matches!(
-                        agent["status"].as_str(),
-                        Some("pending" | "running" | "waiting")
-                    )
+                .copied()
+                .find(|t| t["id"] == id && t["deletedAt"].is_null())
+        };
+        let mut agents = Vec::new();
+        for record in rows(&self.value, "subagents")? {
+            let child_id = record["childThreadId"].as_str();
+            let child = child_id.and_then(find);
+            let live = child.and_then(|t| t["activityRunStatus"].as_str());
+            let status = live.unwrap_or_else(|| record["status"].as_str().unwrap_or("unknown"));
+            agents.push(AgentDetails {
+                id: text(record, "id")?.into(),
+                child_thread_id: child_id.map(Into::into),
+                title: child
+                    .and_then(|t| t["title"].as_str())
+                    .or_else(|| record["title"].as_str())
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or("Agent")
+                    .into(),
+                driver: text(record, "driver")?.into(),
+                provider_instance_id: text(record, "providerInstanceId")?.into(),
+                model: record["model"].as_str().map(Into::into),
+                origin: serde_json::from_value(record["origin"].clone())?,
+                status: serde_json::from_value(json!(status))?,
+                started_at: if live.is_some() {
+                    child.and_then(|t| t["activityRunStartedAt"].as_str())
+                } else {
+                    record["startedAt"].as_str()
+                }
+                .map(Into::into),
+                completed_at: if live.is_some() {
+                    None
+                } else {
+                    record["completedAt"].as_str().map(Into::into)
+                },
+                progress: if live.is_some() {
+                    None
+                } else {
+                    record["progress"].as_str().map(Into::into)
+                },
+                result: if live.is_some() {
+                    None
+                } else {
+                    record["result"].as_str().map(Into::into)
+                },
+                missing: child_id.is_some() && child.is_none(),
+            });
+        }
+        let mut related_threads = Vec::new();
+        let mut add = |id: &str, kind: RelationshipKind| {
+            if id == owner_id
+                || related_threads
+                    .iter()
+                    .any(|r: &RelatedThreadDetails| r.thread_id == id)
+            {
+                return;
+            }
+            let thread = find(id);
+            let provider = thread.and_then(|t| {
+                providers
+                    .iter()
+                    .find(|p| p["instanceId"] == t["modelSelection"]["instanceId"])
+            });
+            let status = thread
+                .and_then(|t| {
+                    t["activityRunStatus"]
+                        .as_str()
+                        .or_else(|| t["status"].as_str())
                 })
-                .count(),
+                .unwrap_or("unknown");
+            related_threads.push(RelatedThreadDetails {
+                thread_id: id.into(),
+                title: thread
+                    .and_then(|t| t["title"].as_str())
+                    .unwrap_or(id)
+                    .into(),
+                kind,
+                status: serde_json::from_value(json!(status)).unwrap_or_default(),
+                driver: provider.and_then(|p| p["driver"].as_str()).map(Into::into),
+                missing: thread.is_none(),
+            });
+        };
+        if let Some(parent) = lineage_parent(owner) {
+            add(parent, RelationshipKind::Parent);
+        }
+        for thread in threads {
+            if lineage_parent(thread) == Some(owner_id)
+                && !agents
+                    .iter()
+                    .any(|a| a.child_thread_id.as_deref() == thread["id"].as_str())
+                && let Some(id) = thread["id"].as_str()
+            {
+                add(
+                    id,
+                    if thread["lineage"]["relationshipToParent"] == "subagent" {
+                        RelationshipKind::Subagent
+                    } else {
+                        RelationshipKind::Fork
+                    },
+                );
+            }
+        }
+        for transfer in self.value["contextTransfers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if transfer["sourceThreadId"] == owner_id {
+                if let Some(id) = transfer["targetThreadId"].as_str() {
+                    add(id, RelationshipKind::Transfer);
+                }
+            } else if transfer["targetThreadId"] == owner_id
+                && let Some(id) = transfer["sourceThreadId"].as_str()
+            {
+                add(id, RelationshipKind::Transfer);
+            }
+        }
+        agents.sort_by(|a, b| {
+            b.started_at
+                .cmp(&a.started_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(ThreadDetails {
+            model: text(&owner["modelSelection"], "model")?.into(),
+            runtime_mode: owner["runtimeMode"]
+                .as_str()
+                .unwrap_or("approval-required")
+                .into(),
+            branch: owner["branch"].as_str().map(Into::into),
+            active_agents: agents.iter().filter(|a| a.status.is_active()).count(),
             total_agents: agents.len(),
             context_tokens: self.context_usage().and_then(|usage| usage.tokens),
             git: None,
+            agents,
+            related_threads,
         })
     }
     pub fn snapshot(frame: &Value) -> Result<Self> {
@@ -664,9 +992,39 @@ impl Projection {
     fn entry(&self, item: &Value, environment: &str) -> Result<SessionMessageEntry> {
         let id = text(item, "id")?;
         let kind = text(item, "type")?;
+        let agent = (kind == "subagent")
+            .then(|| {
+                self.value["subagents"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|agent| {
+                        agent["id"] == item["subagentId"] || agent["parentNodeId"] == item["id"]
+                    })
+            })
+            .flatten();
+        let child = agent.and_then(|agent| {
+            self.value["nativeAgentShells"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|thread| thread["id"] == agent["childThreadId"])
+        });
+        let live_agent_status = child.and_then(|child| child["activityRunStatus"].as_str());
+        let status = live_agent_status
+            .or_else(|| agent.and_then(|a| a["status"].as_str()))
+            .or_else(|| item["status"].as_str());
         let complete = !matches!(
-            item["status"].as_str(),
-            Some("running" | "pending" | "in_progress")
+            status,
+            Some(
+                "running"
+                    | "waiting"
+                    | "pending"
+                    | "preparing"
+                    | "queued"
+                    | "starting"
+                    | "in_progress"
+            )
         );
         let part = match kind {
             "user_message" | "assistant_message" => {
@@ -741,7 +1099,14 @@ impl Projection {
                         json!({"text":s["text"].as_str().or_else(||s["step"].as_str()).unwrap_or("Task"),
                             "done":s["status"]=="completed", "status":if s["status"]=="running" {json!("inProgress")} else {Value::Null}})).collect::<Vec<_>>()}),
                     "subagent" => {
-                        json!({"kind":"unknown","name":"Agent","input":{"prompt":item["prompt"],"model":item["model"]}})
+                        let source = agent.unwrap_or(item);
+                        let title = child
+                            .and_then(|child| child["title"].as_str())
+                            .or_else(|| source["title"].as_str())
+                            .filter(|title| !title.trim().is_empty());
+                        json!({"kind":"unknown","name":title.map(|title|format!("Agent: {}", agent_display_title(title))).unwrap_or_else(||"Agent".into()),
+                            "input":{"prompt":source["prompt"],"model":source["model"],
+                                "driver":source["driver"],"providerInstanceId":source["providerInstanceId"]}})
                     }
                     _ => {
                         json!({"kind":"unknown","name":item["toolName"].as_str().or_else(||item["title"].as_str()).unwrap_or(kind),"input":item.get("input")})
@@ -751,9 +1116,27 @@ impl Projection {
                     "isError":item["status"]=="failed" || item["outputIndicatesFailure"]==true,"output":item["output"].as_str().map(str::to_string).or_else(||item["result"].as_str().map(str::to_string)).or_else(|| (!item["output"].is_null()).then(||item["output"].to_string())),
                     "subagentRef":item["childThreadId"], "subagentTail":item["progress"]});
                 if kind == "subagent" {
+                    let source = agent.unwrap_or(item);
+                    part["subagentRef"] =
+                        if self.value["nativeAgentShells"].is_array() && child.is_none() {
+                            Value::Null
+                        } else {
+                            source["childThreadId"].clone()
+                        };
+                    part["subagentTail"] = if live_agent_status.is_some() {
+                        Value::Null
+                    } else {
+                        source["progress"].clone()
+                    };
+                    part["output"] = if live_agent_status.is_some() {
+                        Value::Null
+                    } else {
+                        source["result"].clone()
+                    };
+                    part["isError"] = json!(status == Some("failed"));
                     part["subagentStatus"] = json!(if !complete {
                         "running"
-                    } else if item["status"] == "failed" {
+                    } else if status == Some("failed") {
                         "failed"
                     } else {
                         "done"
@@ -787,6 +1170,182 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn titles_match_web_codex_task_names_without_changing_arbitrary_titles() {
+        assert_eq!(
+            agent_display_title("Subagent: /root/tasks/review_changes"),
+            "Review Changes"
+        );
+        assert_eq!(
+            agent_display_title("subagent: Renamed child"),
+            "Renamed child"
+        );
+        assert_eq!(
+            agent_display_title("/home/team/file.rs"),
+            "/home/team/file.rs"
+        );
+    }
+
+    fn agent_projection(records: Vec<Value>) -> Projection {
+        Projection {
+            sequence: 0,
+            value: json!({"thread":{"id":"parent","modelSelection":{"model":"model"},"runtimeMode":"auto-accept-edits"},
+                "subagents":records,"contextTransfers":[]}),
+        }
+    }
+
+    fn agent_record(id: &str, child: Option<&str>, status: &str) -> Value {
+        json!({"id":id,"parentNodeId":"spawn","childThreadId":child,"title":"Original task",
+            "driver":"pi","providerInstanceId":"team-account","origin":"app_owned","model":"child-model",
+            "status":status,"startedAt":"2026-10-10T00:00:00Z","completedAt":"2026-10-10T00:01:00Z","result":"First result"})
+    }
+
+    #[test]
+    fn missing_child_preserves_task_history_without_open_or_stop_capability() {
+        let projection = agent_projection(vec![agent_record("task", Some("missing"), "failed")]);
+        let details = projection.details().unwrap();
+        let agent = &details.agents[0];
+        assert!(agent.missing);
+        assert!(!agent.can_stop());
+        assert_eq!(agent.status, AgentStatus::Failed);
+        assert_eq!(agent.title, "Original task");
+        assert_eq!(agent.elapsed_ms(i64::MAX), Some(60_000));
+        assert_eq!(details.active_agents, 0);
+        assert_eq!(details.runtime_mode, "auto-accept-edits");
+    }
+
+    #[test]
+    fn completed_and_failed_history_do_not_become_running_as_time_passes() {
+        let mut completed = agent_record("done", None, "completed");
+        completed["completedAt"] = Value::Null;
+        let projection = agent_projection(vec![completed, agent_record("failed", None, "failed")]);
+        let details = projection.details().unwrap();
+        assert_eq!(details.total_agents, 2);
+        assert_eq!(details.active_agents, 0);
+        assert_eq!(details.agents[0].status, AgentStatus::Completed);
+        assert_eq!(details.agents[0].elapsed_ms(i64::MAX), None);
+        assert_eq!(details.agents[1].status, AgentStatus::Failed);
+    }
+
+    #[test]
+    fn renamed_live_child_overrides_archived_title_and_settled_task() {
+        let projection = agent_projection(vec![agent_record("task", Some("child"), "completed")]);
+        let shell = Shell {
+            threads: vec![
+                json!({"id":"child","title":"Renamed live child","activityRunStatus":"waiting",
+            "activityRunStartedAt":"2026-10-10T01:00:00Z"}),
+            ],
+            archived_threads: vec![json!({"id":"child","title":"Old archived title"})],
+            ..Default::default()
+        };
+        let details = projection.details_with_shell(&shell, &[]).unwrap();
+        let agent = &details.agents[0];
+        assert_eq!(agent.title, "Renamed live child");
+        assert_eq!(agent.status, AgentStatus::Waiting);
+        assert_eq!(agent.started_at.as_deref(), Some("2026-10-10T01:00:00Z"));
+        assert_eq!(agent.completed_at, None);
+        assert_eq!(agent.result, None);
+        assert!(agent.can_stop());
+        assert_eq!(agent.driver, "pi");
+        assert_eq!(agent.provider_instance_id, "team-account");
+        assert_eq!(details.active_agents, 1);
+    }
+
+    #[test]
+    fn lineage_keeps_missing_parent_archived_fork_and_transfer_without_duplicate_agents() {
+        let mut projection = agent_projection(vec![agent_record("task", Some("child"), "running")]);
+        projection.value["thread"]["lineage"] = json!({"parentThreadId":"missing-parent"});
+        projection.value["contextTransfers"] =
+            json!([{"sourceThreadId":"parent","targetThreadId":"fork"}]);
+        let shell = Shell {
+            threads: vec![
+                json!({"id":"child","title":"Child","lineage":{"parentThreadId":"parent","relationshipToParent":"subagent"}}),
+            ],
+            archived_threads: vec![
+                json!({"id":"fork","title":"Archived fork","status":"completed","modelSelection":{"instanceId":"account"},
+                "forkedFrom":{"type":"run","threadId":"parent"}}),
+            ],
+            ..Default::default()
+        };
+        let details = projection
+            .details_with_shell(&shell, &[json!({"instanceId":"account","driver":"codex"})])
+            .unwrap();
+        assert_eq!(details.related_threads.len(), 2);
+        assert!(details.related_threads[0].missing);
+        assert_eq!(details.related_threads[0].kind, RelationshipKind::Parent);
+        assert_eq!(details.related_threads[1].title, "Archived fork");
+        assert_eq!(details.related_threads[1].driver.as_deref(), Some("codex"));
+        assert_eq!(details.related_threads[1].status, AgentStatus::Completed);
+    }
+
+    #[test]
+    fn canonical_subagent_record_populates_native_spawn_chip() {
+        let mut projection = agent_projection(vec![agent_record("task", Some("child"), "failed")]);
+        projection.enrich_agent_shells(&Shell {
+            threads: vec![json!({"id":"child","title":"Renamed child"})],
+            ..Default::default()
+        });
+        let entry = projection
+            .entry(
+                &json!({"id":"spawn","subagentId":"task","type":"subagent","status":"completed",
+            "startedAt":"2026-10-10T00:00:00Z"}),
+                "environment",
+            )
+            .unwrap();
+        let MessagePart::Tool {
+            call,
+            subagent_ref,
+            subagent_status,
+            is_error,
+            output,
+            ..
+        } = &entry.parts[0]
+        else {
+            panic!("expected spawn chip")
+        };
+        assert!(call.is_subagent_spawn());
+        assert_eq!(call.subagent_model(), Some("child-model"));
+        assert!(
+            matches!(call, zeron_proto::ToolCall::Unknown { name, .. } if name == "Agent: Renamed child")
+        );
+        assert_eq!(subagent_ref.as_deref(), Some("child"));
+        assert_eq!(*subagent_status, Some(zeron_doc::SubagentStatus::Failed));
+        assert!(*is_error);
+        assert_eq!(output.as_deref(), Some("First result"));
+    }
+
+    #[test]
+    fn missing_enriched_child_does_not_create_a_broken_spawn_link() {
+        let mut projection =
+            agent_projection(vec![agent_record("task", Some("missing"), "completed")]);
+        projection.enrich_agent_shells(&Shell::default());
+        let entry = projection
+            .entry(
+                &json!({"id":"spawn","subagentId":"task","type":"subagent","status":"completed",
+            "startedAt":"2026-10-10T00:00:00Z"}),
+                "environment",
+            )
+            .unwrap();
+        assert!(matches!(
+            &entry.parts[0],
+            MessagePart::Tool {
+                subagent_ref: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_details_default_runtime_and_empty_lineage() {
+        let details: ThreadDetails =
+            serde_json::from_value(json!({"model":"model","branch":null,"activeAgents":0,
+            "totalAgents":0,"contextTokens":null,"git":null}))
+            .unwrap();
+        assert_eq!(details.runtime_mode, "approval-required");
+        assert!(details.agents.is_empty());
+        assert!(details.related_threads.is_empty());
+    }
 
     #[test]
     fn a_turn_groups_reasoning_and_tools_without_fake_checkpoint_calls() {

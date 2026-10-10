@@ -494,13 +494,17 @@ impl Render for BrowserSurface {
             });
         let open = button(
             "browser-external",
-            "Open in default browser",
+            if self.t3_settings {
+                "T3 sign-in stays in this browser"
+            } else {
+                "Open in default browser"
+            },
             icons::ARROW_UP_RIGHT,
-            has_page,
+            has_page && !self.t3_settings,
             &theme,
             cx,
         )
-        .when(has_page, |el| {
+        .when(has_page && !self.t3_settings, |el| {
             el.on_click(cx.listener(|this, _, _, cx| this.open_external(cx)))
         });
         let toolbar = surface_chrome::toolbar(&theme)

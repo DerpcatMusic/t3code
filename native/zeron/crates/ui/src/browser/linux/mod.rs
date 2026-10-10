@@ -203,6 +203,26 @@ impl NativePage {
         data: &BrowserData,
         tx: Sender<NativeEvent>,
     ) -> Result<Self, String> {
+        Self::new_with_profile(data, tx, None)
+    }
+
+    pub fn new_t3_settings(
+        _: &gpui::Window,
+        data: &BrowserData,
+        tx: Sender<NativeEvent>,
+        profile: &std::path::Path,
+    ) -> Result<Self, String> {
+        let profile =
+            std::path::absolute(profile).map_err(|_| "Invalid T3 browser profile path")?;
+        let profile = profile.to_str().ok_or("Invalid T3 browser profile path")?;
+        Self::new_with_profile(data, tx, Some(profile))
+    }
+
+    fn new_with_profile(
+        data: &BrowserData,
+        tx: Sender<NativeEvent>,
+        profile: Option<&str>,
+    ) -> Result<Self, String> {
         let worker = data.worker()?;
         let id = worker.next_id.fetch_add(1, Ordering::Relaxed);
         let route = Arc::new(Route {
@@ -218,7 +238,11 @@ impl NativePage {
             .lock()
             .unwrap()
             .insert(id, Arc::downgrade(&route));
-        worker.send(id, json!({"cmd":"create"}))?;
+        let create = match profile {
+            Some(profile) => json!({"cmd":"create", "t3Profile":profile}),
+            None => json!({"cmd":"create"}),
+        };
+        worker.send(id, create)?;
         Ok(Self {
             worker,
             route,
@@ -235,6 +259,19 @@ impl NativePage {
             pressed: std::cell::Cell::new(None),
         })
     }
+    pub fn load_t3_session(
+        &self,
+        host: &super::t3_settings::HostSession<'_>,
+    ) -> Result<(), String> {
+        self.worker.send(
+            self.id,
+            json!({
+                "cmd":"load-session", "url":host.url, "origin":host.origin,
+                "cookieName":host.cookie_name, "accessToken":host.access_token,
+            }),
+        )
+    }
+
     pub fn load(&self, url: &str) -> Result<(), String> {
         self.worker.send(self.id, json!({"cmd":"load","url":url}))
     }

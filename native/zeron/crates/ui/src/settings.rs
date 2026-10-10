@@ -343,6 +343,13 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     });
 }
 
+/// Keep T3 account cookies separate from previews and scoped to this native profile.
+#[cfg(target_os = "linux")]
+pub(crate) fn t3_browser_profile_dir(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.data_dir.join("t3-connect-webkit"))
+}
+
 /// Latest settings, including mutations still inside the debounce window.
 pub fn current(cx: &App) -> UiSettings {
     cx.try_global::<SettingsStore>()

@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <webkit2/webkit2.h>
 
@@ -16,8 +17,10 @@ typedef struct {
     guint id;
     GtkWidget *window;
     WebKitWebView *web;
-    gboolean visible, dirty, document;
-    gchar *error;
+    gboolean visible, dirty, document, t3_settings;
+    gchar *error, *t3_entry_url;
+    const char *t3_title;
+    GCancellable *session_load;
     guint width, height;
     double scale;
     WebKitOptionMenu *options;
@@ -25,6 +28,7 @@ typedef struct {
 } Page;
 static GHashTable *pages;
 static WebKitWebContext *context;
+static GHashTable *t3_contexts;
 static GByteArray *input;
 
 static gboolean write_all(const void *data, size_t length) {
@@ -152,8 +156,10 @@ static void browser_im_init(BrowserIM *im) { im->preedit = g_strdup(""); }
 static void state(Page *p) {
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
-    member_string(b, "url", webkit_web_view_get_uri(p->web));
-    member_string(b, "title", webkit_web_view_get_title(p->web) ?: "");
+    // OAuth URLs can contain codes/session tickets. They stay inside WebKit;
+    // native chrome and the frame protocol only see the settings entry URL.
+    member_string(b, "url", p->t3_settings ? p->t3_entry_url : webkit_web_view_get_uri(p->web));
+    member_string(b, "title", p->t3_settings ? (p->t3_title ?: "T3 Settings") : (webkit_web_view_get_title(p->web) ?: ""));
     member_string(b, "error", p->error);
     member_bool(b, "loading", webkit_web_view_is_loading(p->web));
     member_bool(b, "can_back", webkit_web_view_can_go_back(p->web));
@@ -172,7 +178,7 @@ static gboolean failed(WebKitWebView *web, WebKitLoadEvent event, const char *ur
     if (g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED))
         return TRUE;
     g_free(p->error);
-    p->error = g_strdup(error->message);
+    p->error = g_strdup(p->t3_settings ? "Could not load T3 settings. Reload to try again." : error->message);
     state(p);
     return TRUE;
 }
@@ -203,8 +209,14 @@ static gboolean policy(WebKitWebView *web, WebKitPolicyDecision *decision,
             return TRUE;
         }
         if (type == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
-            if (webkit_navigation_action_is_user_gesture(action))
-                send_packet('N', p->id, uri, strlen(uri));
+            if (webkit_navigation_action_is_user_gesture(action)) {
+                if (p->t3_settings)
+                    // Clerk's web flow redirects back to this HTTP origin.
+                    // A separate tab/system browser would lose the host cookie.
+                    webkit_web_view_load_uri(web, uri);
+                else
+                    send_packet('N', p->id, uri, strlen(uri));
+            }
             webkit_policy_decision_ignore(decision);
             return TRUE;
         }
@@ -249,8 +261,9 @@ static gboolean context_menu(WebKitWebView *web, WebKitContextMenu *menu, GdkEve
     JsonBuilder *b = menu_builder(x / p->scale, y / p->scale);
     if (webkit_hit_test_result_context_is_link(hit)) {
         p->context_link = g_strdup(webkit_hit_test_result_get_link_uri(hit));
-        menu_item(b, "Open link in new tab", "open-link", allowed(p->context_link), FALSE);
-        menu_item(b, "Copy link address", "copy-link", TRUE, FALSE);
+        menu_item(b, p->t3_settings ? "Open link" : "Open link in new tab", "open-link", allowed(p->context_link), FALSE);
+        if (!p->t3_settings)
+            menu_item(b, "Copy link address", "copy-link", TRUE, FALSE);
     }
     menu_item(b, "Copy", "copy",
               webkit_hit_test_result_context_is_selection(hit) ||
@@ -294,12 +307,41 @@ static void free_page(gpointer data) {
         webkit_option_menu_close(p->options);
         g_clear_object(&p->options);
     }
+    if (p->session_load) g_cancellable_cancel(p->session_load);
+    g_clear_object(&p->session_load);
+    // Cookie installation retains the WebView until its async callback ends.
+    // It must not call handlers whose Page has already been freed.
+    g_signal_handlers_disconnect_by_data(p->web, p);
     gtk_widget_destroy(p->window);
     g_free(p->error);
+    g_free(p->t3_entry_url);
     g_free(p->context_link);
     g_free(p);
 }
-static Page *new_page(guint id) {
+static WebKitWebContext *t3_context(const char *profile) {
+    // Rust creates this private directory. Fail closed if it was replaced by
+    // a symlink or made accessible to another user before the helper sees it.
+    struct stat info;
+    if (!g_path_is_absolute(profile) || lstat(profile, &info) || !S_ISDIR(info.st_mode) ||
+        info.st_uid != getuid() || (info.st_mode & 077) != 0)
+        return NULL;
+    WebKitWebContext *existing = g_hash_table_lookup(t3_contexts, profile);
+    if (existing) return existing;
+    char *data = g_build_filename(profile, "data", NULL);
+    char *cache = g_build_filename(profile, "cache", NULL);
+    WebKitWebsiteDataManager *manager = webkit_website_data_manager_new(
+        "base-data-directory", data, "base-cache-directory", cache, NULL);
+    WebKitWebContext *ctx = webkit_web_context_new_with_website_data_manager(manager);
+    g_object_unref(manager);
+    char *cookies = g_build_filename(profile, "cookies.sqlite", NULL);
+    webkit_cookie_manager_set_persistent_storage(webkit_web_context_get_cookie_manager(ctx),
+        cookies, WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+    g_signal_connect(ctx, "download-started", G_CALLBACK(download), NULL);
+    g_hash_table_insert(t3_contexts, g_strdup(profile), ctx);
+    g_free(data); g_free(cache); g_free(cookies);
+    return ctx;
+}
+static Page *new_page(guint id, const char *profile) {
     Page *p = g_new0(Page, 1);
     p->id = id;
     p->width = 800;
@@ -307,7 +349,10 @@ static Page *new_page(guint id) {
     p->scale = 1;
     p->visible = TRUE;
     p->window = gtk_offscreen_window_new();
-    p->web = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(context));
+    p->t3_settings = profile && *profile;
+    WebKitWebContext *ctx = p->t3_settings ? t3_context(profile) : context;
+    if (!ctx) p->error = g_strdup("Could not open the private T3 Connect browser profile.");
+    p->web = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(ctx ?: context));
     BrowserIM *im = g_object_new(browser_im_get_type(), NULL);
     im->id = id;
     webkit_web_view_set_input_method_context(p->web, WEBKIT_INPUT_METHOD_CONTEXT(im));
@@ -328,6 +373,7 @@ static Page *new_page(guint id) {
     g_signal_connect(p->web, "show-option-menu", G_CALLBACK(option_menu), p);
     gtk_widget_show_all(p->window);
     g_hash_table_insert(pages, GUINT_TO_POINTER(id), p);
+    if (p->error) state(p);
     return p;
 }
 static gboolean render_frames(gpointer unused) {
@@ -470,32 +516,69 @@ static void evaluated(GObject *web, GAsyncResult *result, gpointer data) {
     g_clear_object(&v);
     g_clear_error(&error);
 }
-typedef struct { WebKitWebView *web; char *url; } SessionLoad;
+typedef struct { WebKitWebView *web; char *url; GCancellable *cancel; } SessionLoad;
 static void session_ready(GObject *manager, GAsyncResult *result, gpointer data) {
     SessionLoad *load = data;
     GError *error = NULL;
-    if (webkit_cookie_manager_add_cookie_finish(WEBKIT_COOKIE_MANAGER(manager), result, &error))
-        webkit_web_view_load_uri(load->web, load->url);
-    else
-        webkit_web_view_load_html(load->web, "<p>Could not sign in. Close this settings tab and try again.</p>", NULL);
+    gboolean ready = webkit_cookie_manager_add_cookie_finish(WEBKIT_COOKIE_MANAGER(manager), result, &error);
+    if (!g_cancellable_is_cancelled(load->cancel)) {
+        if (ready)
+            webkit_web_view_load_uri(load->web, load->url);
+        else
+            webkit_web_view_load_html(load->web, "<p>Could not sign in. Close this settings tab and try again.</p>", NULL);
+    }
     g_clear_error(&error);
+    g_object_unref(load->cancel);
     g_object_unref(load->web);
     g_free(load->url);
     g_free(load);
 }
 
+// These pure helpers are also exercised without starting GTK or WebKit.
+static gboolean t3_session_target_allowed(const char *origin, const char *target) {
+    GUri *base = g_uri_parse(origin, G_URI_FLAGS_NONE, NULL);
+    GUri *url = g_uri_parse(target, G_URI_FLAGS_NONE, NULL);
+    gboolean ok = base && url && g_uri_get_host(base) &&
+        (!g_strcmp0(g_uri_get_scheme(base), "https") || !g_strcmp0(g_uri_get_scheme(base), "http")) &&
+        !g_uri_get_userinfo(base) && !g_uri_get_userinfo(url) &&
+        (!*g_uri_get_path(base) || !strcmp(g_uri_get_path(base), "/")) &&
+        !g_uri_get_query(base) && !g_uri_get_fragment(base) &&
+        !g_uri_get_query(url) && !g_uri_get_fragment(url) &&
+        !g_strcmp0(g_uri_get_scheme(base), g_uri_get_scheme(url)) &&
+        !g_strcmp0(g_uri_get_host(base), g_uri_get_host(url)) &&
+        g_uri_get_port(base) == g_uri_get_port(url);
+    if (base) g_uri_unref(base);
+    if (url) g_uri_unref(url);
+    return ok;
+}
+
+static const char *t3_page_title(const char *url) {
+    GUri *uri = g_uri_parse(url, G_URI_FLAGS_NONE, NULL);
+    if (!uri) return "T3 Settings";
+    const char *path = g_uri_get_path(uri);
+    const char *title = !strcmp(path, "/settings/connections") ? "T3 Connect" :
+        !strcmp(path, "/settings/providers") ? "T3 Providers" :
+        !strcmp(path, "/pull-requests") ? "Pull Requests" :
+        !strcmp(path, "/usage") ? "Usage" : "T3 Settings";
+    g_uri_unref(uri);
+    return title;
+}
+
 static void load_session(Page *p, JsonObject *o) {
     const char *origin = string(o, "origin"), *url = string(o, "url");
     const char *name = string(o, "cookieName"), *token = string(o, "accessToken");
-    if (!allowed(origin) || !allowed(url) || !*name || strlen(name) > 100 || !*token || strlen(token) > 16384)
+    if (p->error || !t3_session_target_allowed(origin, url) || !*name || strlen(name) > 100 || !*token || strlen(token) > 16384)
         return;
     for (const char *c = name; *c; c++) if (!g_ascii_isalnum(*c) && *c != '_' && *c != '-') return;
     for (const char *c = token; *c; c++) if (*c < 0x21 || *c == ';' || *c == 0x7f) return;
-    GUri *base = g_uri_parse(origin, G_URI_FLAGS_NONE, NULL), *target = g_uri_parse(url, G_URI_FLAGS_NONE, NULL);
-    if (!base || !target) { if (base) g_uri_unref(base); if (target) g_uri_unref(target); return; }
-    gboolean same = !g_strcmp0(g_uri_get_scheme(base), g_uri_get_scheme(target)) &&
-        !g_strcmp0(g_uri_get_host(base), g_uri_get_host(target)) && g_uri_get_port(base) == g_uri_get_port(target);
-    if (same) {
+    GUri *base = g_uri_parse(origin, G_URI_FLAGS_NONE, NULL);
+    if (base) {
+        p->t3_settings = TRUE;
+        p->t3_title = t3_page_title(url);
+        g_free(p->t3_entry_url);
+        p->t3_entry_url = g_strdup(url);
+        // The host bootstrap remains a session cookie. WebKit, not native
+        // settings, owns persistence of the account's own non-session cookies.
         SoupCookie *cookie = soup_cookie_new(name, token, g_uri_get_host(base), "/", -1);
         soup_cookie_set_http_only(cookie, TRUE);
         soup_cookie_set_secure(cookie, !strcmp(g_uri_get_scheme(base), "https"));
@@ -503,11 +586,14 @@ static void load_session(Page *p, JsonObject *o) {
         SessionLoad *load = g_new0(SessionLoad, 1);
         load->web = g_object_ref(p->web);
         load->url = g_strdup(url);
-        webkit_cookie_manager_add_cookie(webkit_web_context_get_cookie_manager(context), cookie, NULL, session_ready, load);
+        if (p->session_load) g_cancellable_cancel(p->session_load);
+        g_clear_object(&p->session_load);
+        p->session_load = g_cancellable_new();
+        load->cancel = g_object_ref(p->session_load);
+        webkit_cookie_manager_add_cookie(webkit_web_context_get_cookie_manager(webkit_web_view_get_context(p->web)), cookie, load->cancel, session_ready, load);
         soup_cookie_free(cookie);
     }
-    g_uri_unref(base);
-    g_uri_unref(target);
+    if (base) g_uri_unref(base);
 }
 
 static void command(JsonObject *o) {
@@ -516,7 +602,7 @@ static void command(JsonObject *o) {
     Page *p = g_hash_table_lookup(pages, GUINT_TO_POINTER(id));
     if (!strcmp(cmd, "create")) {
         if (!p)
-            new_page(id);
+            new_page(id, string(o, "t3Profile"));
         return;
     }
     if (!p)
@@ -559,10 +645,12 @@ static void command(JsonObject *o) {
             g_clear_object(&p->options);
         }
     } else if (!strcmp(cmd, "open-link")) {
-        if (p->context_link && allowed(p->context_link))
-            send_packet('N', p->id, p->context_link, strlen(p->context_link));
+        if (p->context_link && allowed(p->context_link)) {
+            if (p->t3_settings) webkit_web_view_load_uri(p->web, p->context_link);
+            else send_packet('N', p->id, p->context_link, strlen(p->context_link));
+        }
     } else if (!strcmp(cmd, "copy-link")) {
-        if (p->context_link)
+        if (p->context_link && !p->t3_settings)
             send_packet('C', p->id, p->context_link, strlen(p->context_link));
     } else if (!strcmp(cmd, "select-all"))
         webkit_web_view_execute_editing_command(p->web, "SelectAll");
@@ -662,6 +750,8 @@ static gboolean read_commands(gint fd, GIOCondition condition, gpointer unused) 
 }
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    // New cookie/database/cache files inherit private permissions too.
+    umask(0077);
     // Offscreen GTK surfaces need CPU-addressable frames, never native GL child windows.
     g_setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", TRUE);
     g_setenv("GDK_SCALE", "1", TRUE);
@@ -673,11 +763,13 @@ int main(int argc, char **argv) {
     pages = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, free_page);
     input = g_byte_array_new();
     context = webkit_web_context_new_ephemeral();
+    t3_contexts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
     g_signal_connect(context, "download-started", G_CALLBACK(download), NULL);
     g_unix_fd_add(STDIN_FILENO, G_IO_IN | G_IO_HUP | G_IO_ERR, read_commands, NULL);
     g_timeout_add(16, render_frames, NULL);
     gtk_main();
     g_hash_table_destroy(pages);
+    g_hash_table_destroy(t3_contexts);
     g_byte_array_unref(input);
     g_object_unref(context);
     return 0;

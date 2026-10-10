@@ -106,6 +106,8 @@ pub struct SidebarThread {
     #[serde(default)]
     pub pin_order_key: Option<String>,
     #[serde(default)]
+    active_order_key: Option<String>,
+    #[serde(default)]
     auto_settle_disabled_at: Option<DateTime<Utc>>,
     #[serde(default)]
     last_visited_at: Option<DateTime<Utc>>,
@@ -272,7 +274,23 @@ impl SidebarThread {
             })
     }
 
-    fn settled_timestamp(&self) -> DateTime<Utc> {
+    pub fn compare_active(&self, other: &Self) -> Ordering {
+        match (&self.active_order_key, &other.active_order_key) {
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (Some(left), Some(right)) => left.cmp(right),
+            (None, None) => {
+                let anchor = |thread: &Self| {
+                    thread
+                        .created_at
+                        .max(thread.unsettled_at.unwrap_or(thread.created_at))
+                };
+                anchor(other).cmp(&anchor(self))
+            }
+        }
+    }
+
+    pub fn settled_timestamp(&self) -> DateTime<Utc> {
         self.settled_at.unwrap_or_else(|| {
             [
                 self.latest_user_message_at,

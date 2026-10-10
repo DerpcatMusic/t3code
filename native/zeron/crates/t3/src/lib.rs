@@ -3,6 +3,7 @@
 mod attachments;
 mod git;
 mod projection;
+mod queue;
 mod sidebar;
 mod transport;
 mod workspace;
@@ -223,15 +224,77 @@ impl T3Service {
                 device_id: config.environment_id,
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
-                capabilities: vec![CAPABILITY.into()],
+                capabilities: queue::capabilities(),
             },
             attachments: attachments::Attachments::new(&config.origin)?,
             origin: config.origin,
             connection_path: path.to_owned(),
-            catalog: Arc::new(std::sync::RwLock::new(rows(&server, "providers")?.to_vec())),
+            catalog,
             project_write: tokio::sync::Mutex::new(()),
             task,
         }))
+    }
+
+    fn workspace_cwd(&self, thread: &Value) -> Result<String, RpcError> {
+        if let Some(cwd) = thread["worktreePath"].as_str() {
+            return Ok(cwd.to_owned());
+        }
+        self.shell
+            .borrow()
+            .projects
+            .iter()
+            .find(|project| project["id"] == thread["projectId"])
+            .and_then(|project| project["workspaceRoot"].as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| RpcError::BadParams("T3 thread workspace is unavailable".into()))
+    }
+
+    async fn stop_agent(&self, params: Value) -> Result<RpcReply, RpcError> {
+        let parent = text(&params, "chatId").map_err(failed)?;
+        let child = text(&params, "childThreadId").map_err(failed)?;
+        let client = self.client().await?;
+        let projection = client
+            .call(
+                "orchestration.getThreadProjection",
+                json!({"threadId":parent}),
+            )
+            .await?;
+        if projection["thread"]["id"] != parent
+            || !owned_agent_child(parent, child, &projection, &self.shell.borrow())
+        {
+            return Err(RpcError::BadParams(
+                "Agent is not owned by this T3 thread".into(),
+            ));
+        }
+        let child_projection = client
+            .call(
+                "orchestration.getThreadProjection",
+                json!({"threadId":child}),
+            )
+            .await?;
+        if child_projection["thread"]["id"] != child {
+            return Err(failed("T3 child thread identity mismatch"));
+        }
+        // Same durable Stop command as the web client, including held follow-ups.
+        let run = queue::active_run(&child_projection).or_else(|| {
+            let has_children = child_projection["subagents"]
+                .as_array()?
+                .iter()
+                .any(|agent| {
+                    matches!(
+                        agent["status"].as_str(),
+                        Some("pending" | "running" | "waiting")
+                    )
+                });
+            has_children
+                .then(|| child_projection["runs"].as_array()?.last())
+                .flatten()
+        });
+        let Some(run) = run else {
+            return RpcReply::value(&json!({"stopped":false}));
+        };
+        self.dispatch(json!({"type":"run.interrupt","threadId":child,"runId":text(run,"id").map_err(failed)?,"holdQueue":true})).await?;
+        RpcReply::value(&json!({"stopped":true}))
     }
 
     async fn client(&self) -> Result<Arc<RpcClient>, RpcError> {
@@ -373,6 +436,7 @@ impl T3Service {
             return Ok(json!({"ok":true}));
         }
         let command = match op {
+            "setT3RuntimeMode" => runtime_mode_command(id, &params["runtimeMode"])?,
             "renameChat" => {
                 json!({"type":"thread.metadata.update","threadId":id,"title":text(&params,"title").map_err(failed)?})
             }
@@ -435,7 +499,7 @@ impl T3Service {
                 }
                 json!({"type":"thread.create","threadId":id,"projectId":project_id,
                     "title":params["title"].as_str().filter(|s|!s.trim().is_empty()).unwrap_or("New session"),
-                    "modelSelection":selection,"runtimeMode":"approval-required","interactionMode":"default",
+                    "modelSelection":selection,"runtimeMode":create_runtime_mode(&params)?,"interactionMode":"default",
                     "branch":params["branch"],"worktreePath":null,"createdBy":"user","creationSource":"web"})
             }
             // Zeron account and sync mutations are not T3 operations.
@@ -587,6 +651,65 @@ impl T3Service {
 
 fn failed(error: impl std::fmt::Display) -> RpcError {
     RpcError::Failed(error.to_string())
+}
+
+fn runtime_mode(value: &Value) -> Result<&str, RpcError> {
+    match value.as_str() {
+        Some(mode @ ("approval-required" | "auto-accept-edits" | "auto" | "full-access")) => {
+            Ok(mode)
+        }
+        _ => Err(RpcError::BadParams(
+            "runtimeMode must be approval-required, auto-accept-edits, auto, or full-access".into(),
+        )),
+    }
+}
+
+fn create_runtime_mode(params: &Value) -> Result<&str, RpcError> {
+    match params.get("runtimeMode") {
+        Some(value) => runtime_mode(value),
+        None => Ok("approval-required"),
+    }
+}
+
+fn runtime_mode_command(id: &str, value: &Value) -> Result<Value, RpcError> {
+    Ok(json!({"type":"thread.runtime-mode.set","threadId":id,"runtimeMode":runtime_mode(value)?}))
+}
+
+fn owned_agent_child(parent: &str, child: &str, projection: &Value, shell: &Shell) -> bool {
+    if parent == child {
+        return false;
+    }
+    if projection["subagents"].as_array().is_some_and(|agents| {
+        agents.iter().any(|agent| {
+            agent["threadId"] == parent
+                && agent["childThreadId"] == child
+                && matches!(
+                    agent["status"].as_str(),
+                    Some("pending" | "running" | "waiting")
+                )
+        })
+    }) {
+        return true;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut current = child;
+    while seen.insert(current) {
+        let Some(thread) = shell.all_threads().find(|thread| thread["id"] == current) else {
+            return false;
+        };
+        if !thread["deletedAt"].is_null() || thread["lineage"]["relationshipToParent"] != "subagent"
+        {
+            return false;
+        }
+        let Some(next) = thread["lineage"]["parentThreadId"].as_str() else {
+            return false;
+        };
+        if next == parent {
+            return true;
+        }
+        current = next;
+    }
+    false
 }
 
 fn visit_command(id: &str, thread: &Value) -> Result<Value, RpcError> {
@@ -943,7 +1066,7 @@ impl RpcService for T3Service {
                     .await?;
                 Ok(once(
                     json!([{"id":environment,"name":config["environment"]["label"],"platform":config["environment"]["platform"]["os"],
-                    "lastSeenAt":chrono::Utc::now(),"createdAt":null,"version":null,"capabilities":[]}]),
+                    "lastSeenAt":chrono::Utc::now(),"createdAt":null,"version":null,"capabilities":self.engine_info.capabilities}]),
                 ))
             }
             methods::LIST_HARNESSES => {
@@ -1012,6 +1135,38 @@ impl RpcService for T3Service {
             }
             methods::MUTATE => self.mutate(params).await.map(RpcReply::Value),
             methods::QUEUE_COMMAND => self.command(params).await.map(RpcReply::Value),
+            methods::WATCH_QUEUE
+            | methods::QUEUE_MESSAGE
+            | methods::UPDATE_QUEUED_MESSAGE
+            | methods::MOVE_QUEUED_MESSAGE
+            | methods::REMOVE_QUEUED_MESSAGE
+            | methods::SEND_QUEUED_MESSAGE_NOW
+            | methods::STEER_QUEUED_MESSAGE_NOW => self.queue(method, params).await,
+            "T3StopAgent" => self.stop_agent(params).await,
+            "T3CheckConnection" => {
+                let config = self
+                    .client()
+                    .await?
+                    .call("server.getConfig", json!({}))
+                    .await?;
+                if config["environment"]["environmentId"] != environment {
+                    return Err(failed("T3 config identity mismatch"));
+                }
+                RpcReply::value(&json!({"connected":true}))
+            }
+            "T3ListBranches" => {
+                let thread = self
+                    .thread(text(&params, "chatId").map_err(failed)?)
+                    .await?;
+                let cwd = self.workspace_cwd(&thread)?;
+                let branches = self
+                    .git(methods::LIST_BRANCHES, json!({"repoPath":cwd}))
+                    .await?;
+                match branches {
+                    RpcReply::Value(branches) => RpcReply::value(&json!({"branches":branches})),
+                    _ => Err(failed("Invalid T3 branch list")),
+                }
+            }
             methods::UPLOAD_CHUNK => self.attachments.chunk(params).await.map(RpcReply::Value),
             methods::UPLOAD_COMMIT => self
                 .attachments
@@ -1076,10 +1231,10 @@ impl RpcService for T3Service {
                         let frame = rx.as_mut()?.recv().await?;
                         let upgrade =
                             frame["kind"] == "snapshot" && frame["hasMoreHistory"] == true;
-                        Some(((false, Some(frame)), (rx, upgrade, client, id)))
+                        Some(((0u8, Some(frame)), (rx, upgrade, client, id)))
                     },
                 )
-                .chain(stream::once(async { (false, None) }));
+                .chain(stream::once(async { (0u8, None) }));
                 // An optional Git read must not hold up the opening transcript.
                 let git_events = stream::once(async move {
                     let cwd = workspace?;
@@ -1093,11 +1248,21 @@ impl RpcService for T3Service {
                 })
                 .flat_map(|rx| {
                     stream::unfold(rx, |mut rx| async move {
-                        Some(((true, Some(rx.as_mut()?.recv().await?)), rx))
+                        Some(((1u8, Some(rx.as_mut()?.recv().await?)), rx))
                     })
                 })
-                .chain(stream::once(async { (true, None) }));
-                let events = Box::pin(stream::select(thread_events, git_events));
+                .chain(stream::once(async { (1u8, None) }));
+                let live_shell = self.shell.clone();
+                let catalog = self.catalog.clone();
+                let shell_events = stream::unfold(self.shell.clone(), |mut shell| async move {
+                    shell.changed().await.ok()?;
+                    shell.borrow_and_update();
+                    Some(((2u8, Some(json!({"kind":"native-shell"}))), shell))
+                });
+                let events = Box::pin(stream::select(
+                    stream::select(thread_events, git_events),
+                    shell_events,
+                ));
                 let workspace_binding =
                     (thread["projectId"].clone(), thread["worktreePath"].clone());
                 let stream = stream::unfold(
@@ -1109,8 +1274,9 @@ impl RpcService for T3Service {
                         None::<GitStats>,
                         workspace_binding,
                         false,
+                        None::<ThreadDetails>,
                     ),
-                    |(
+                    move |(
                         mut rx,
                         mut projection,
                         mut previous,
@@ -1118,114 +1284,161 @@ impl RpcService for T3Service {
                         mut git,
                         workspace_binding,
                         mut history_pending,
-                    )| async move {
-                        loop {
-                            let (git_event, frame) = rx.next().await?;
-                            if !git_event && frame.is_none() {
-                                return None;
-                            }
-                            let result: Result<Option<Value>> = (|| {
-                                let empty = Value::Null;
-                                let frame = frame.as_ref().unwrap_or(&empty);
-                                let snapshot = !git_event && frame["kind"] == "snapshot";
-                                if git_event {
-                                    let changed = match GitStats::apply(
-                                        &mut git,
-                                        (!frame.is_null()).then_some(frame),
-                                    ) {
-                                        Ok(changed) => changed,
-                                        Err(_) => {
-                                            tracing::warn!(
-                                                "invalid T3 Git status; clearing native counts"
-                                            );
-                                            git.take().is_some()
-                                        }
-                                    };
-                                    if !changed {
-                                        return Ok(None);
-                                    }
-                                } else if snapshot {
-                                    projection = Some(Projection::snapshot(&frame)?);
-                                    history_pending = frame["hasMoreHistory"] == true;
-                                } else if let Some(p) = &mut projection {
-                                    if !p.apply(&frame)? {
-                                        return Ok(None);
-                                    }
-                                } else {
-                                    return Ok(None);
-                                }
-                                let Some(projection) = projection.as_ref() else {
-                                    return Ok(None);
-                                };
-                                // Rebind Git to the new checkout after a T3 worktree handoff.
-                                ensure!(
-                                    projection.value["thread"]["projectId"] == workspace_binding.0
-                                        && projection.value["thread"]["worktreePath"]
-                                            == workspace_binding.1,
-                                    "T3 workspace changed; resubscribe"
-                                );
-                                let baseline = if snapshot {
-                                    Some(projection.entries(&environment)?)
-                                } else {
-                                    None
-                                };
-                                let frame_update = if let Some(next) = &baseline {
-                                    previous = next.clone();
-                                    TranscriptFrame::reset(next)
-                                } else if git_event {
-                                    TranscriptFrame::Delta {
-                                        upsert: vec![],
-                                        append: vec![],
-                                        remove: vec![],
-                                        count: previous.len(),
-                                    }
-                                } else {
-                                    projection.transcript_delta(
-                                        &frame,
-                                        &environment,
-                                        &mut previous,
-                                    )?
-                                };
-                                let update = TranscriptUpdate {
-                                    frame: frame_update,
-                                    context_usage: projection.context_usage(),
-                                    replay_baseline: baseline
-                                        .as_ref()
-                                        .map(|next| TranscriptBaseline::capture(next)),
-                                };
-                                let mut value = serde_json::to_value(update)?;
-                                if history_pending {
-                                    value["historyPending"] = json!(true);
-                                }
-                                if git_event
-                                    || snapshot
-                                    || frame["event"]["type"] != "turn-item.updated"
-                                {
-                                    let mut details = projection.details()?;
-                                    details.git = git.clone();
-                                    value["t3Details"] = serde_json::to_value(details)?;
-                                }
-                                Ok(Some(value))
-                            })();
-                            match result {
-                                Ok(Some(value)) => {
-                                    return Some((
-                                        value,
-                                        (
-                                            rx,
-                                            projection,
-                                            previous,
-                                            environment,
-                                            git,
-                                            workspace_binding,
-                                            history_pending,
-                                        ),
-                                    ));
-                                }
-                                Ok(None) => continue,
-                                Err(error) => {
-                                    tracing::warn!(%error,"invalid T3 transcript; resubscribing");
+                        mut previous_details,
+                    )| {
+                        let live_shell = live_shell.clone();
+                        let catalog = catalog.clone();
+                        async move {
+                            loop {
+                                let (source, frame) = rx.next().await?;
+                                let git_event = source == 1;
+                                let shell_event = source == 2;
+                                if source == 0 && frame.is_none() {
                                     return None;
+                                }
+                                let result: Result<Option<Value>> = (|| {
+                                    let empty = Value::Null;
+                                    let frame = frame.as_ref().unwrap_or(&empty);
+                                    let snapshot = source == 0 && frame["kind"] == "snapshot";
+                                    if git_event {
+                                        let changed = match GitStats::apply(
+                                            &mut git,
+                                            (!frame.is_null()).then_some(frame),
+                                        ) {
+                                            Ok(changed) => changed,
+                                            Err(_) => {
+                                                tracing::warn!(
+                                                    "invalid T3 Git status; clearing native counts"
+                                                );
+                                                git.take().is_some()
+                                            }
+                                        };
+                                        if !changed {
+                                            return Ok(None);
+                                        }
+                                    } else if snapshot {
+                                        projection = Some(Projection::snapshot(&frame)?);
+                                        history_pending = frame["hasMoreHistory"] == true;
+                                    } else if shell_event {
+                                        // The owning thread stream need not emit when a child is renamed.
+                                    } else if let Some(p) = &mut projection {
+                                        if !p.apply(&frame)? {
+                                            return Ok(None);
+                                        }
+                                    } else {
+                                        return Ok(None);
+                                    }
+                                    let Some(projection) = projection.as_mut() else {
+                                        return Ok(None);
+                                    };
+                                    let shell = live_shell.borrow();
+                                    if snapshot
+                                        || shell_event
+                                        || frame["event"]["type"] == "subagent.updated"
+                                    {
+                                        projection.enrich_agent_shells(&shell);
+                                    }
+                                    let details = if git_event
+                                        || shell_event
+                                        || snapshot
+                                        || frame["event"]["type"] != "turn-item.updated"
+                                    {
+                                        let providers = catalog.read().map_err(|_| {
+                                            anyhow::anyhow!("Provider catalog unavailable")
+                                        })?;
+                                        let mut details =
+                                            projection.details_with_shell(&shell, &providers)?;
+                                        details.git = git.clone();
+                                        Some(details)
+                                    } else {
+                                        None
+                                    };
+                                    // Rebind Git to the new checkout after a T3 worktree handoff.
+                                    ensure!(
+                                        projection.value["thread"]["projectId"]
+                                            == workspace_binding.0
+                                            && projection.value["thread"]["worktreePath"]
+                                                == workspace_binding.1,
+                                        "T3 workspace changed; resubscribe"
+                                    );
+                                    let baseline = if snapshot || shell_event {
+                                        let entries = projection.entries(&environment)?;
+                                        if shell_event && entries == previous {
+                                            if previous_details == details {
+                                                return Ok(None);
+                                            }
+                                            None
+                                        } else {
+                                            Some(entries)
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    let frame_update = if let Some(next) = &baseline {
+                                        let update = if snapshot {
+                                            TranscriptFrame::reset(next)
+                                        } else {
+                                            zeron_doc::diff_transcript(&previous, next)
+                                        };
+                                        previous = next.clone();
+                                        update
+                                    } else if git_event || shell_event {
+                                        TranscriptFrame::Delta {
+                                            upsert: vec![],
+                                            append: vec![],
+                                            remove: vec![],
+                                            count: previous.len(),
+                                        }
+                                    } else {
+                                        projection.transcript_delta(
+                                            &frame,
+                                            &environment,
+                                            &mut previous,
+                                        )?
+                                    };
+                                    let update = TranscriptUpdate {
+                                        frame: frame_update,
+                                        context_usage: projection.context_usage(),
+                                        replay_baseline: baseline
+                                            .as_ref()
+                                            .filter(|_| snapshot)
+                                            .map(|next| TranscriptBaseline::capture(next)),
+                                    };
+                                    let mut value = serde_json::to_value(update)?;
+                                    if history_pending {
+                                        value["historyPending"] = json!(true);
+                                    }
+                                    if let Some(details) = details {
+                                        value["t3Details"] = serde_json::to_value(&details)?;
+                                        previous_details = Some(details);
+                                    }
+                                    Ok(Some(value))
+                                })(
+                                );
+                                match result {
+                                    Ok(Some(value)) => {
+                                        return Some((
+                                            value,
+                                            (
+                                                rx,
+                                                projection,
+                                                previous,
+                                                environment,
+                                                git,
+                                                workspace_binding,
+                                                history_pending,
+                                                previous_details,
+                                            ),
+                                        ));
+                                    }
+                                    Ok(None) => continue,
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            category = "transcript_projection",
+                                            "invalid T3 transcript; resubscribing"
+                                        );
+                                        return None;
+                                    }
                                 }
                             }
                         }
@@ -1259,6 +1472,59 @@ impl RpcService for T3Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_changes_are_explicit_and_new_threads_default_to_approval_required() {
+        assert_eq!(
+            create_runtime_mode(&json!({})).unwrap(),
+            "approval-required"
+        );
+        for mode in [
+            "approval-required",
+            "auto-accept-edits",
+            "auto",
+            "full-access",
+        ] {
+            assert_eq!(
+                create_runtime_mode(&json!({"runtimeMode":mode})).unwrap(),
+                mode
+            );
+            assert_eq!(
+                runtime_mode_command("thread", &json!(mode)).unwrap(),
+                json!({"type":"thread.runtime-mode.set","threadId":"thread","runtimeMode":mode})
+            );
+        }
+        assert!(runtime_mode_command("thread", &json!("workspace-write")).is_err());
+        assert!(create_runtime_mode(&json!({"runtimeMode":null})).is_err());
+    }
+
+    #[test]
+    fn stop_only_accepts_owned_agents_not_forks_self_or_cyclic_lineage() {
+        let mut shell = Shell::default();
+        shell.threads = vec![
+            json!({"id":"child","lineage":{"parentThreadId":"parent","relationshipToParent":"subagent"}}),
+            json!({"id":"grandchild","lineage":{"parentThreadId":"child","relationshipToParent":"subagent"}}),
+            json!({"id":"fork","lineage":{"parentThreadId":"parent","relationshipToParent":"fork"}}),
+            json!({"id":"cycle","lineage":{"parentThreadId":"cycle","relationshipToParent":"subagent"}}),
+        ];
+        assert!(owned_agent_child(
+            "parent",
+            "grandchild",
+            &json!({}),
+            &shell
+        ));
+        for child in ["parent", "fork", "cycle", "unrelated"] {
+            assert!(!owned_agent_child("parent", child, &json!({}), &shell));
+        }
+        assert!(owned_agent_child(
+            "parent",
+            "direct",
+            &json!({"subagents":[
+                {"threadId":"parent","childThreadId":"direct","status":"running"}
+            ]}),
+            &shell
+        ));
+    }
 
     #[tokio::test]
     async fn unchanged_shell_views_do_not_repaint_but_changes_are_delivered() {

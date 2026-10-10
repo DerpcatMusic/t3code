@@ -42,6 +42,7 @@ use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
 mod chip;
+mod t3_permissions;
 pub use chip::ChipKind;
 use chip::*;
 pub(crate) use chip::{
@@ -5974,6 +5975,7 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
+    t3_permissions: t3_permissions::T3Permissions,
     /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
     drafts: HashMap<String, String>,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
@@ -6301,6 +6303,7 @@ impl Composer {
             queue_edit_draft: None,
             queue_edit_attachment_draft: None,
             pickers,
+            t3_permissions: t3_permissions::T3Permissions::default(),
             drafts: HashMap::new(),
             attachments: HashMap::new(),
             attachment_drafts: HashMap::new(),
@@ -8446,6 +8449,7 @@ impl Composer {
 
         // Draft swap on chat navigation — the input entity itself survives.
         if key != self.current_key {
+            self.t3_permissions.close_menu();
             if !key.is_empty() && !self.current_key.is_empty() {
                 // Switching between established chats still snaps to the new
                 // draft; a tail from a hero transition belongs to its old chat.
@@ -8766,6 +8770,7 @@ impl Composer {
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
+        let t3_runtime_mode = self.is_t3(cx).then(|| self.t3_runtime_mode(cx).to_owned());
         let existing_cwd = self
             .state
             .read(cx)
@@ -9236,6 +9241,9 @@ impl Composer {
                         "chatId": chat_id,
                     });
                     if let Some(object) = mutate.as_object_mut() {
+                        if let Some(mode) = &t3_runtime_mode {
+                            object.insert("runtimeMode".into(), serde_json::json!(mode));
+                        }
                         match &space_id {
                             Some(space_id) => {
                                 object.insert(
@@ -11498,15 +11506,20 @@ impl Render for Composer {
         // old floating checkout/ref controls dissolve into the session footer.
         // Non-Git sessions grow the slot continuously from zero.
         let session_chrome = 1.0 - new_thread_chrome;
-        let bottom_slot = if has_new_thread_git_selectors || self.dock_frame.is_some() {
+        let t3 = self.is_t3(cx);
+        let bottom_slot = if t3 || has_new_thread_git_selectors || self.dock_frame.is_some() {
             1.0
         } else {
             session_chrome
         };
         let container = if bottom_slot > 0.0 {
-            let footer = (session_chrome_opacity > 0.0 && !self.side_chat).then(|| {
-                self.pickers
-                    .update(cx, |pickers, cx| pickers.render_footer(cx))
+            let footer = ((t3 || session_chrome_opacity > 0.0) && !self.side_chat).then(|| {
+                if self.is_t3(cx) {
+                    Some(self.render_t3_permissions(cx))
+                } else {
+                    self.pickers
+                        .update(cx, |pickers, cx| pickers.render_footer(cx))
+                }
             });
             if session_chrome_opacity > 0.0 {
                 let harness = (!self.side_chat)
@@ -11529,7 +11542,7 @@ impl Render for Composer {
                     .mt(px(-Theme::SPACE_SM * (1.0 - bottom_slot)))
                     .mb(px(-Theme::SPACE_SM * bottom_slot))
                     .relative()
-                    .when(new_thread_chrome_opacity > 0.0, |slot| {
+                    .when(!t3 && new_thread_chrome_opacity > 0.0, |slot| {
                         slot.child(
                             div()
                                 .absolute()
@@ -11541,7 +11554,7 @@ impl Render for Composer {
                                 .children(new_thread_git_selectors),
                         )
                     })
-                    .when(session_chrome_opacity > 0.0, |slot| {
+                    .when(t3 || session_chrome_opacity > 0.0, |slot| {
                         slot.child(
                             div()
                                 .absolute()
@@ -11550,7 +11563,7 @@ impl Render for Composer {
                                 .h(px(SESSION_FOOTER_HEIGHT))
                                 .flex()
                                 .items_center()
-                                .opacity(session_chrome_opacity)
+                                .opacity(if t3 { 1.0 } else { session_chrome_opacity })
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
                                 .child(
                                     // The footer row's own 4px gap: the PR badge

@@ -208,40 +208,53 @@ impl ConnectionConfig {
         let client = Arc::new(RpcClient::new(out, input));
         let task = tokio::spawn(async move {
             let (mut writer, mut reader) = ws.split();
-            let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
-            let mut last_pong = tokio::time::Instant::now();
+            let now = tokio::time::Instant::now();
+            let mut heartbeat =
+                tokio::time::interval_at(now + Duration::from_secs(20), Duration::from_secs(20));
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_pong = now;
+            let mut category = "peer_closed";
+            let mut close_code = None::<u16>;
             let result: Result<()> = async {
                 loop {
                     tokio::select! {
                         outgoing = outgoing.recv() => {
-                            let Some(outgoing) = outgoing else { break; };
-                            let frame: ClientFrame = serde_json::from_str(&outgoing)?;
-                            writer.send(Message::Text(request_frame(frame)?.to_string())).await?;
+                            let Some(outgoing) = outgoing else { category = "client_closed"; break; };
+                            let frame: ClientFrame = serde_json::from_str(&outgoing).map_err(|error| { category = "request_encoding"; error })?;
+                            let request = request_frame(frame).inspect_err(|_| category = "request_encoding")?;
+                            writer.send(Message::Text(request.to_string())).await.inspect_err(|_| category = "socket_write")?;
                         }
                         message = reader.next() => {
                             let Some(message) = message else { break; };
-                            match message? {
-                                Message::Text(text) => {
-                                    let value: Value = serde_json::from_str(&text)?;
-                                    let frames = if let Value::Array(values) = value { values } else { vec![value] };
+                            match message.inspect_err(|_| category = "socket_read")? {
+                                message @ (Message::Text(_) | Message::Binary(_)) => {
+                                    // Effect layerJson accepts UTF-8 bytes as well as strings.
+                                    // WebSocket opcodes are transport details, not the RPC codec.
+                                    let frames = payload_frames(message).inspect_err(|_| category = "payload_decode")?;
                                     for frame in frames {
                                         if frame["_tag"] == "Pong" { last_pong = tokio::time::Instant::now(); continue; }
-                                        let (replies, ack) = response_frames(&frame)?;
+                                        let (replies, ack) = response_frames(&frame).inspect_err(|_| category = "rpc_envelope")?;
                                         for reply in replies {
-                                            if incoming.send(reply.to_string()).await.is_err() { return Ok(()); }
+                                            if incoming.send(reply.to_string()).await.is_err() { category = "client_closed"; return Ok(()); }
                                         }
-                                        if let Some(ack) = ack { writer.send(Message::Text(ack.to_string())).await?; }
+                                        if let Some(ack) = ack { writer.send(Message::Text(ack.to_string())).await.inspect_err(|_| category = "socket_write")?; }
                                     }
                                 }
-                                Message::Ping(bytes) => writer.send(Message::Pong(bytes)).await?,
-                                Message::Close(_) => break,
+                                Message::Ping(bytes) => writer.send(Message::Pong(bytes)).await.inspect_err(|_| category = "socket_write")?,
+                                Message::Close(frame) => {
+                                    close_code = frame.map(|frame| u16::from(frame.code));
+                                    break;
+                                },
                                 Message::Pong(_) => {},
-                                _ => bail!("unsupported T3 websocket frame"),
+                                _ => { category = "websocket_opcode"; bail!("unsupported T3 websocket frame"); },
                             }
                         }
                         _ = heartbeat.tick() => {
-                            ensure!(last_pong.elapsed() < Duration::from_secs(60), "T3 heartbeat timed out");
-                            writer.send(Message::Text(json!({"_tag":"Ping"}).to_string())).await?;
+                            if last_pong.elapsed() >= Duration::from_secs(60) {
+                                category = "heartbeat_timeout";
+                                bail!("T3 heartbeat timed out");
+                            }
+                            writer.send(Message::Text(json!({"_tag":"Ping"}).to_string())).await.inspect_err(|_| category = "socket_write")?;
                         }
                     }
                 }
@@ -249,7 +262,14 @@ impl ConnectionConfig {
             }.await;
             // Errors may contain arbitrary server data; don't log credential-bearing frames.
             if result.is_err() {
-                tracing::warn!("T3 transport disconnected");
+                tracing::warn!(
+                    category,
+                    last_pong_age_seconds = last_pong.elapsed().as_secs(),
+                    "T3 transport disconnected"
+                );
+            } else {
+                // Close reason text is untrusted and may contain credentials.
+                tracing::debug!(category, close_code, "T3 transport closed");
             }
             let _ = closed_tx.send(true);
         });
@@ -294,6 +314,19 @@ fn request_frame(frame: ClientFrame) -> Result<Value> {
         json!({"_tag":"Request", "id":frame.id.to_string(), "tag":method,
         "payload":frame.params, "headers":[]}),
     )
+}
+
+fn payload_frames(message: Message) -> Result<Vec<Value>> {
+    let value: Value = match message {
+        Message::Text(text) => serde_json::from_str(&text)?,
+        Message::Binary(bytes) => serde_json::from_slice(&bytes)?,
+        _ => bail!("expected T3 JSON payload"),
+    };
+    Ok(if let Value::Array(values) = value {
+        values
+    } else {
+        vec![value]
+    })
 }
 
 fn response_frames(frame: &Value) -> Result<(Vec<Value>, Option<Value>)> {
@@ -409,6 +442,29 @@ mod tests {
             json!({"_tag":"Interrupt","requestId":"12"})
         );
         assert!(response_frames(&json!({"_tag":"Chunk","requestId":"12","values":[]})).is_err());
+    }
+
+    #[test]
+    fn effect_json_heartbeat_and_chunks_accept_text_and_binary_payloads() {
+        for envelope in [
+            json!({"_tag":"Pong"}),
+            json!([{"_tag":"Pong"}, {"_tag":"Chunk","requestId":"12","values":[{"kind":"synchronized"}]}]),
+        ] {
+            let encoded = envelope.to_string();
+            let text = payload_frames(Message::Text(encoded.clone())).unwrap();
+            let binary = payload_frames(Message::Binary(encoded.into_bytes())).unwrap();
+            assert_eq!(text, binary);
+            assert_eq!(binary[0]["_tag"], "Pong");
+            if binary.len() > 1 {
+                let (_, ack) = response_frames(&binary[1]).unwrap();
+                assert_eq!(ack.unwrap()["requestId"], "12");
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_binary_json_is_not_accepted_as_a_heartbeat() {
+        assert!(payload_frames(Message::Binary(vec![0xff])).is_err());
     }
 
     #[test]

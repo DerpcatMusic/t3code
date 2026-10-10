@@ -67,6 +67,8 @@ jobs:
       - name: Embedded browser interaction and cookie isolation
         run: |
           cc crates/ui/src/browser/linux/helper.c -o "$RUNNER_TEMP/z3-webkit-check" $(pkg-config --cflags --libs gtk+-3.0 webkit2gtk-4.1 json-glib-1.0)
+          cc crates/ui/src/browser/linux/session_policy_test.c -o "$RUNNER_TEMP/z3-webkit-policy-check" $(pkg-config --cflags --libs gtk+-3.0 webkit2gtk-4.1 json-glib-1.0)
+          "$RUNNER_TEMP/z3-webkit-policy-check"
           xvfb-run -a python3 ../test_webkit.py "$RUNNER_TEMP/z3-webkit-check"
       - name: ONNX Runtime
         run: |
@@ -103,6 +105,13 @@ jobs:
         run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib only_dedicated_t3_visual_links -j2
       - name: Per-chat panel regression
         run: LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib session_panels_ -j2
+      - name: T3 sidebar, floating panel, permissions and browser regressions
+        run: |
+          LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_sidebar::tests -j2
+          LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_chrome::tests -j2
+          LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_permissions::tests -j2
+          LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_settings::tests -j2
+          LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib actions_ui::tests -j2
       - name: Native desktop
         run: cargo build --release --locked -p zeron --bin zeron -j2
       - name: Separate preference paths
