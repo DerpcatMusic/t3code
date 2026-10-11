@@ -267,6 +267,7 @@ impl ProvidersPage {
             return true;
         }
         if self.editor.take().is_some() {
+            self.scroll = Default::default();
             self.error = None;
             cx.notify();
             return true;
@@ -331,6 +332,7 @@ impl ProvidersPage {
                         page.snapshot = Some(snapshot);
                         if close_editor {
                             page.editor = None;
+                            page.scroll = Default::default();
                         }
                         crate::pickers::bump_harness_catalog(cx);
                     }
@@ -448,6 +450,7 @@ impl ProvidersPage {
             show_models: false,
         });
         self.error = None;
+        self.scroll = Default::default();
         cx.notify();
     }
 
@@ -919,6 +922,7 @@ impl ProvidersPage {
                     cx,
                     |page, cx| {
                         page.editor = None;
+                        page.scroll = Default::default();
                         page.error = None;
                         cx.notify();
                     },
@@ -932,6 +936,7 @@ impl ProvidersPage {
                         cx,
                         |page, cx| {
                             page.editor = None;
+                            page.scroll = Default::default();
                             page.request("T3ProvidersGet", json!({}), false, cx);
                         },
                     ))
@@ -1067,7 +1072,7 @@ impl Render for ProvidersPage {
                 popover::skeleton_rows("t3-providers-loading", &theme, 4, cx.entity_id(), cx),
             ));
         }
-        if let Some(snapshot) = &self.snapshot {
+        if let Some(snapshot) = self.snapshot.as_ref().filter(|_| self.editor.is_none()) {
             body = body
                 .child(widgets::section_label(&theme, "Provider instances"))
                 .child(widgets::section_card(&theme).children(rows));
