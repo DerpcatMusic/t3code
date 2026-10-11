@@ -325,6 +325,8 @@ pub struct ThreadDetails {
     pub context_tokens: Option<u64>,
     pub git: Option<GitStats>,
     #[serde(default)]
+    pub git_error: Option<String>,
+    #[serde(default)]
     pub agents: Vec<AgentDetails>,
     #[serde(default)]
     pub related_threads: Vec<RelatedThreadDetails>,
@@ -419,10 +421,12 @@ impl AgentDetails {
             .ok()?
             .timestamp_millis();
         // Only a live authoritative status permits a running duration.
-        let end = match self.completed_at.as_deref() {
-            Some(end) => DateTime::parse_from_rfc3339(end).ok()?.timestamp_millis(),
-            None if self.status.is_active() => now_ms,
-            None => return None,
+        let end = if self.status.is_active() {
+            now_ms
+        } else {
+            DateTime::parse_from_rfc3339(self.completed_at.as_deref()?)
+                .ok()?
+                .timestamp_millis()
         };
         Some(end.saturating_sub(start).max(0) as u64)
     }
@@ -450,45 +454,104 @@ pub struct RelatedThreadDetails {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitRemoteStats {
+    pub has_upstream: bool,
+    pub ahead_count: u64,
+    pub behind_count: u64,
+    pub ahead_of_default_count: Option<u64>,
+    pub pr: Option<GitPullRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPullRequest {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitStats {
+    pub is_repo: bool,
     pub branch: Option<String>,
     pub additions: u64,
     pub deletions: u64,
+    pub has_primary_remote: bool,
+    pub is_default_ref: bool,
+    pub has_working_tree_changes: bool,
+    pub working_tree_files: usize,
+    pub working_tree_additions: u64,
+    pub working_tree_deletions: u64,
+    pub remote: Option<GitRemoteStats>,
 }
 
 impl GitStats {
     pub fn apply(current: &mut Option<Self>, frame: Option<&Value>) -> Result<bool> {
         let next = if let Some(frame) = frame {
-            match text(frame, "_tag")? {
-                "remoteUpdated" => return Ok(false),
-                "snapshot" | "localUpdated" => {}
-                _ => bail!("unknown T3 Git status event"),
-            }
-            let local = &frame["local"];
-            let is_repo = local["isRepo"]
-                .as_bool()
-                .context("invalid T3 repository status")?;
-            if is_repo {
-                let totals = if local["branchChanges"].is_object() {
-                    &local["branchChanges"]
-                } else {
-                    &local["workingTree"]
-                };
-                Some(Self {
-                    branch: if local["refName"].is_null() {
-                        None
+            let tag = text(frame, "_tag")?;
+            match tag {
+                "remoteUpdated" => {
+                    // A remote frame cannot establish whether this checkout is a repository.
+                    let Some(local) = current.as_ref() else {
+                        return Ok(false);
+                    };
+                    let mut next = local.clone();
+                    next.remote = serde_json::from_value(frame["remote"].clone())?;
+                    Some(next)
+                }
+                "snapshot" | "localUpdated" => {
+                    let local = &frame["local"];
+                    let is_repo = local["isRepo"]
+                        .as_bool()
+                        .context("invalid T3 repository status")?;
+                    let working = &local["workingTree"];
+                    let totals = if local["branchChanges"].is_object() {
+                        &local["branchChanges"]
                     } else {
-                        Some(text(local, "refName")?.into())
-                    },
-                    additions: totals["insertions"]
-                        .as_u64()
-                        .context("invalid T3 Git additions")?,
-                    deletions: totals["deletions"]
-                        .as_u64()
-                        .context("invalid T3 Git deletions")?,
-                })
-            } else {
-                None
+                        working
+                    };
+                    let remote = if !is_repo {
+                        None
+                    } else if tag == "snapshot" {
+                        serde_json::from_value(frame["remote"].clone())?
+                    } else {
+                        current.as_ref().and_then(|git| git.remote.clone())
+                    };
+                    Some(Self {
+                        is_repo,
+                        branch: if local["refName"].is_null() {
+                            None
+                        } else {
+                            Some(text(local, "refName")?.into())
+                        },
+                        additions: totals["insertions"]
+                            .as_u64()
+                            .context("invalid T3 Git additions")?,
+                        deletions: totals["deletions"]
+                            .as_u64()
+                            .context("invalid T3 Git deletions")?,
+                        has_primary_remote: local["hasPrimaryRemote"]
+                            .as_bool()
+                            .context("invalid T3 remote status")?,
+                        is_default_ref: local["isDefaultRef"]
+                            .as_bool()
+                            .context("invalid T3 default ref status")?,
+                        has_working_tree_changes: local["hasWorkingTreeChanges"]
+                            .as_bool()
+                            .context("invalid T3 working tree status")?,
+                        working_tree_files: rows(working, "files")?.len(),
+                        working_tree_additions: working["insertions"]
+                            .as_u64()
+                            .context("invalid T3 working tree additions")?,
+                        working_tree_deletions: working["deletions"]
+                            .as_u64()
+                            .context("invalid T3 working tree deletions")?,
+                        remote,
+                    })
+                }
+                _ => bail!("unknown T3 Git status event"),
             }
         } else {
             None
@@ -496,6 +559,62 @@ impl GitStats {
         let changed = *current != next;
         *current = next;
         Ok(changed)
+    }
+
+    pub fn push_disabled_reason(&self) -> Option<&'static str> {
+        if !self.is_repo {
+            return Some("Initialize Git first.");
+        }
+        if self.branch.is_none() {
+            return Some("Check out a branch before pushing.");
+        }
+        if self.has_working_tree_changes {
+            return Some("Commit or stash local changes before pushing.");
+        }
+        let Some(remote) = &self.remote else {
+            return Some("Waiting for remote status.");
+        };
+        if remote.behind_count > 0 {
+            return Some("Pull/rebase before pushing.");
+        }
+        if !remote.has_upstream && !self.has_primary_remote {
+            return Some("Add a remote before pushing.");
+        }
+        if remote.ahead_count == 0 {
+            return Some("No local commits to push.");
+        }
+        None
+    }
+
+    pub fn pr_disabled_reason(&self) -> Option<&'static str> {
+        if !self.is_repo {
+            return Some("Initialize Git first.");
+        }
+        if self.branch.is_none() {
+            return Some("Check out a branch before creating a pull request.");
+        }
+        if self.is_default_ref {
+            return Some("Select a feature branch before creating a pull request.");
+        }
+        if self.has_working_tree_changes {
+            return Some("Commit local changes before creating a pull request.");
+        }
+        let Some(remote) = &self.remote else {
+            return Some("Waiting for remote status.");
+        };
+        if !remote.has_upstream && !self.has_primary_remote {
+            return Some("Add a remote before creating a pull request.");
+        }
+        if remote.behind_count > 0 {
+            return Some("Pull/rebase before creating a pull request.");
+        }
+        if remote.pr.as_ref().is_some_and(|pr| pr.state == "open") {
+            return Some("This branch already has an open pull request.");
+        }
+        if remote.ahead_of_default_count.unwrap_or(remote.ahead_count) == 0 {
+            return Some("No commits to include in a pull request.");
+        }
+        None
     }
 }
 
@@ -576,7 +695,12 @@ impl Projection {
             let child_id = record["childThreadId"].as_str();
             let child = child_id.and_then(find);
             let live = child.and_then(|t| t["activityRunStatus"].as_str());
-            let status = live.unwrap_or_else(|| record["status"].as_str().unwrap_or("unknown"));
+            let status = match live {
+                Some("running") => "running",
+                Some("waiting") => "waiting",
+                Some(_) => "pending",
+                None => record["status"].as_str().unwrap_or("unknown"),
+            };
             agents.push(AgentDetails {
                 id: text(record, "id")?.into(),
                 child_thread_id: child_id.map(Into::into),
@@ -700,6 +824,7 @@ impl Projection {
             total_agents: agents.len(),
             context_tokens: self.context_usage().and_then(|usage| usage.tokens),
             git: None,
+            git_error: None,
             agents,
             related_threads,
         })
@@ -1229,6 +1354,17 @@ mod tests {
     }
 
     #[test]
+    fn an_active_agent_duration_uses_now_instead_of_a_stale_completion() {
+        let projection = agent_projection(vec![agent_record("task", None, "running")]);
+        let details = projection.details().unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-10T00:02:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(details.agents[0].elapsed_ms(now), Some(120_000));
+        assert!(!details.agents[0].can_stop());
+    }
+
+    #[test]
     fn renamed_live_child_overrides_archived_title_and_settled_task() {
         let projection = agent_projection(vec![agent_record("task", Some("child"), "completed")]);
         let shell = Shell {
@@ -1249,6 +1385,25 @@ mod tests {
         assert!(agent.can_stop());
         assert_eq!(agent.driver, "pi");
         assert_eq!(agent.provider_instance_id, "team-account");
+        assert_eq!(details.active_agents, 1);
+    }
+
+    #[test]
+    fn live_agent_preparation_matches_web_pending_and_requires_a_real_start_to_stop() {
+        let projection = agent_projection(vec![agent_record("task", Some("child"), "completed")]);
+        let shell = Shell {
+            threads: vec![
+                json!({"id":"child","title":"Live agent","activityRunStatus":"preparing","activityRunStartedAt":null}),
+            ],
+            ..Default::default()
+        };
+        let details = projection.details_with_shell(&shell, &[]).unwrap();
+        let agent = &details.agents[0];
+        assert_eq!(agent.status, AgentStatus::Pending);
+        assert_eq!(agent.completed_at, None);
+        assert_eq!(agent.result, None);
+        assert_eq!(agent.elapsed_ms(i64::MAX), None);
+        assert!(!agent.can_stop());
         assert_eq!(details.active_agents, 1);
     }
 
@@ -1423,17 +1578,34 @@ mod tests {
         assert_eq!(chats[1].parent_chat_id.as_deref(), Some("parent"));
     }
 
+    fn git_local() -> Value {
+        json!({"isRepo":true,"refName":"feature/native","hasPrimaryRemote":true,"isDefaultRef":false,
+            "hasWorkingTreeChanges":false,"workingTree":{"files":[],"insertions":1,"deletions":2},
+            "branchChanges":{"baseRef":"main","insertions":100,"deletions":50}})
+    }
+
+    fn git_remote() -> Value {
+        json!({"hasUpstream":true,"aheadCount":2,"behindCount":0,"aheadOfDefaultCount":3,"pr":null})
+    }
+
     #[test]
-    fn git_counts_use_branch_changes_and_clear_when_unavailable() {
+    fn git_stream_merges_remote_and_local_updates_without_losing_the_other_half() {
         let mut current = None;
-        let mut frame = json!({"_tag":"snapshot","local":{"isRepo":true,"refName":"feature/native",
-            "workingTree":{"insertions":1,"deletions":2},"branchChanges":{"insertions":100,"deletions":50}}});
-        assert!(GitStats::apply(&mut current, Some(&frame)).unwrap());
-        assert_eq!(current.as_ref().unwrap().additions, 100);
+        let mut local = git_local();
         assert!(
-            !GitStats::apply(
+            GitStats::apply(
                 &mut current,
-                Some(&json!({"_tag":"remoteUpdated","remote":null}))
+                Some(&json!({"_tag":"snapshot","local":local,"remote":null}))
+            )
+            .unwrap()
+        );
+        assert_eq!(current.as_ref().unwrap().additions, 100);
+        assert!(current.as_ref().unwrap().remote.is_none());
+        let mut remote = git_remote();
+        assert!(
+            GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"remoteUpdated","remote":remote}))
             )
             .unwrap()
         );
@@ -1441,16 +1613,160 @@ mod tests {
             current.as_ref().unwrap().branch.as_deref(),
             Some("feature/native")
         );
-        frame["_tag"] = json!("localUpdated");
-        frame["local"]["branchChanges"] = Value::Null;
-        GitStats::apply(&mut current, Some(&frame)).unwrap();
+        assert_eq!(
+            current
+                .as_ref()
+                .unwrap()
+                .remote
+                .as_ref()
+                .unwrap()
+                .ahead_count,
+            2
+        );
+        local["branchChanges"] = Value::Null;
+        assert!(
+            GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"localUpdated","local":local}))
+            )
+            .unwrap()
+        );
         assert_eq!(current.as_ref().unwrap().deletions, 2);
-        frame["local"]["workingTree"]["insertions"] = json!(-1);
-        assert!(GitStats::apply(&mut current, Some(&frame)).is_err());
+        assert_eq!(
+            current
+                .as_ref()
+                .unwrap()
+                .remote
+                .as_ref()
+                .unwrap()
+                .ahead_count,
+            2
+        );
+        assert!(
+            !GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"remoteUpdated","remote":remote}))
+            )
+            .unwrap()
+        );
+        remote["pr"] = json!({"number":3,"title":"Native panel","url":"https://example.test/pr/3","state":"open"});
+        assert!(
+            GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"remoteUpdated","remote":remote}))
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            current
+                .as_ref()
+                .unwrap()
+                .remote
+                .as_ref()
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .number,
+            3
+        );
+        assert!(
+            GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"snapshot","local":local,"remote":null}))
+            )
+            .unwrap()
+        );
+        assert!(current.as_ref().unwrap().remote.is_none());
+    }
+
+    #[test]
+    fn unavailable_git_and_a_confirmed_non_repository_are_different_states() {
+        let mut current = None;
+        assert!(
+            !GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"remoteUpdated","remote":git_remote()}))
+            )
+            .unwrap()
+        );
+        assert!(current.is_none());
+        let mut local = git_local();
+        local["isRepo"] = json!(false);
+        local["refName"] = Value::Null;
+        assert!(
+            GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"snapshot","local":local,"remote":null}))
+            )
+            .unwrap()
+        );
+        assert!(!current.as_ref().unwrap().is_repo);
         assert!(GitStats::apply(&mut current, None).unwrap());
         assert!(current.is_none());
-        frame["local"]["isRepo"] = json!(false);
-        assert!(!GitStats::apply(&mut current, Some(&frame)).unwrap());
+    }
+
+    #[test]
+    fn malformed_git_does_not_partially_overwrite_the_last_good_frame() {
+        let mut current = None;
+        GitStats::apply(
+            &mut current,
+            Some(&json!({"_tag":"snapshot","local":git_local(),"remote":git_remote()})),
+        )
+        .unwrap();
+        let previous = current.clone();
+        let mut local = git_local();
+        local["workingTree"]["insertions"] = json!(-1);
+        assert!(
+            GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"localUpdated","local":local}))
+            )
+            .is_err()
+        );
+        assert_eq!(current, previous);
+        let mut remote = git_remote();
+        remote["aheadCount"] = json!(-1);
+        assert!(
+            GitStats::apply(
+                &mut current,
+                Some(&json!({"_tag":"remoteUpdated","remote":remote}))
+            )
+            .is_err()
+        );
+        assert_eq!(current, previous);
+    }
+
+    #[test]
+    fn git_mutations_require_authoritative_remote_status_and_safe_local_state() {
+        let mut current = None;
+        GitStats::apply(
+            &mut current,
+            Some(&json!({"_tag":"snapshot","local":git_local(),"remote":null})),
+        )
+        .unwrap();
+        let git = current.as_mut().unwrap();
+        assert!(git.push_disabled_reason().is_some());
+        assert!(git.pr_disabled_reason().is_some());
+        git.remote = Some(serde_json::from_value(git_remote()).unwrap());
+        assert!(git.push_disabled_reason().is_none());
+        assert!(git.pr_disabled_reason().is_none());
+        git.remote.as_mut().unwrap().ahead_count = 0;
+        assert!(git.push_disabled_reason().is_some());
+        // A pushed feature still has a default-branch delta and can open a PR.
+        assert!(git.pr_disabled_reason().is_none());
+        git.remote.as_mut().unwrap().behind_count = 1;
+        assert!(git.push_disabled_reason().is_some());
+        assert!(git.pr_disabled_reason().is_some());
+        git.remote.as_mut().unwrap().behind_count = 0;
+        git.has_working_tree_changes = true;
+        assert!(git.push_disabled_reason().is_some());
+        assert!(git.pr_disabled_reason().is_some());
+        git.has_working_tree_changes = false;
+        git.is_default_ref = true;
+        assert!(git.pr_disabled_reason().is_some());
+        git.is_repo = false;
+        assert!(git.push_disabled_reason().is_some());
     }
 
     #[test]

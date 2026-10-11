@@ -3,6 +3,7 @@
 mod attachments;
 mod git;
 mod projection;
+mod providers;
 mod queue;
 mod sidebar;
 mod transport;
@@ -240,16 +241,7 @@ impl T3Service {
     }
 
     fn workspace_cwd(&self, thread: &Value) -> Result<String, RpcError> {
-        if let Some(cwd) = thread["worktreePath"].as_str() {
-            return Ok(cwd.to_owned());
-        }
-        self.shell
-            .borrow()
-            .projects
-            .iter()
-            .find(|project| project["id"] == thread["projectId"])
-            .and_then(|project| project["workspaceRoot"].as_str())
-            .map(str::to_owned)
+        thread_workspace(thread, &self.shell.borrow())
             .ok_or_else(|| RpcError::BadParams("T3 thread workspace is unavailable".into()))
     }
 
@@ -657,6 +649,55 @@ fn failed(error: impl std::fmt::Display) -> RpcError {
     RpcError::Failed(error.to_string())
 }
 
+fn thread_workspace(thread: &Value, shell: &Shell) -> Option<String> {
+    thread["worktreePath"]
+        .as_str()
+        .or_else(|| {
+            shell
+                .projects
+                .iter()
+                .find(|project| project["id"] == thread["projectId"])
+                .and_then(|project| project["workspaceRoot"].as_str())
+        })
+        .map(str::to_owned)
+}
+
+fn vcs_events(
+    client: Arc<RpcClient>,
+    cwd: Option<String>,
+) -> impl futures::Stream<Item = (u8, Option<Value>)> {
+    stream::unfold(
+        (None::<zeron_rpc::RpcSubscription>, false, client, cwd),
+        |(mut subscription, retry, client, cwd)| async move {
+            let unavailable = || Some(json!({"kind":"native-git-error"}));
+            let Some(path) = cwd.as_ref() else {
+                return (!retry).then_some(((1, unavailable()), (None, true, client, cwd)));
+            };
+            if subscription.is_none() {
+                if retry {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                subscription = match tokio::time::timeout(
+                    Duration::from_secs(15),
+                    client.subscribe_checked(
+                        "subscribeVcsStatus",
+                        json!({"cwd":path,"includeRemote":true}),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(subscription)) => Some(subscription),
+                    _ => return Some(((1, unavailable()), (None, true, client, cwd))),
+                };
+            }
+            match subscription.as_mut()?.recv().await {
+                Some(frame) => Some(((1, Some(frame)), (subscription, false, client, cwd))),
+                None => Some(((1, unavailable()), (None, true, client, cwd))),
+            }
+        },
+    )
+}
+
 fn runtime_mode(value: &Value) -> Result<&str, RpcError> {
     match value.as_str() {
         Some(mode @ ("approval-required" | "auto-accept-edits" | "auto" | "full-access")) => {
@@ -1014,6 +1055,8 @@ impl RpcService for T3Service {
     async fn handle(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
         let environment = self.engine_info.device_id.clone();
         match method {
+            "T3ProvidersGet" | "T3ProvidersRefresh" | "T3ProviderUpsert" | "T3ProviderRemove"
+            | "T3ProviderUpdate" => self.provider_settings(method, params).await,
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&json!({"ready":true})),
             methods::LOCAL_DEVICE => RpcReply::value(&json!({"deviceId":environment})),
@@ -1195,17 +1238,7 @@ impl RpcService for T3Service {
                 let id = text(&params, "chatId").map_err(failed)?;
                 let client = self.client().await?;
                 let thread = self.thread(id).await?;
-                let workspace = thread["worktreePath"]
-                    .as_str()
-                    .map(String::from)
-                    .or_else(|| {
-                        self.shell
-                            .borrow()
-                            .projects
-                            .iter()
-                            .find(|project| project["id"] == thread["projectId"])
-                            .and_then(|project| project["workspaceRoot"].as_str().map(String::from))
-                    });
+                let workspace = thread_workspace(&thread, &self.shell.borrow());
                 let subscription = client
                     .subscribe_checked(
                         "orchestration.subscribeThread",
@@ -1240,22 +1273,7 @@ impl RpcService for T3Service {
                 )
                 .chain(stream::once(async { (0u8, None) }));
                 // An optional Git read must not hold up the opening transcript.
-                let git_events = stream::once(async move {
-                    let cwd = workspace?;
-                    client
-                        .subscribe_checked(
-                            "subscribeVcsStatus",
-                            json!({"cwd":cwd,"includeRemote":false}),
-                        )
-                        .await
-                        .ok()
-                })
-                .flat_map(|rx| {
-                    stream::unfold(rx, |mut rx| async move {
-                        Some(((1u8, Some(rx.as_mut()?.recv().await?)), rx))
-                    })
-                })
-                .chain(stream::once(async { (1u8, None) }));
+                let git_events = vcs_events(client, workspace.clone());
                 let live_shell = self.shell.clone();
                 let catalog = self.catalog.clone();
                 let shell_events = stream::unfold(self.shell.clone(), |mut shell| async move {
@@ -1267,8 +1285,11 @@ impl RpcService for T3Service {
                     stream::select(thread_events, git_events),
                     shell_events,
                 ));
-                let workspace_binding =
-                    (thread["projectId"].clone(), thread["worktreePath"].clone());
+                let workspace_binding = (
+                    thread["projectId"].clone(),
+                    thread["worktreePath"].clone(),
+                    workspace,
+                );
                 let stream = stream::unfold(
                     (
                         events,
@@ -1279,6 +1300,7 @@ impl RpcService for T3Service {
                         workspace_binding,
                         false,
                         None::<ThreadDetails>,
+                        None::<String>,
                     ),
                     move |(
                         mut rx,
@@ -1289,6 +1311,7 @@ impl RpcService for T3Service {
                         workspace_binding,
                         mut history_pending,
                         mut previous_details,
+                        mut git_error,
                     )| {
                         let live_shell = live_shell.clone();
                         let catalog = catalog.clone();
@@ -1305,19 +1328,25 @@ impl RpcService for T3Service {
                                     let frame = frame.as_ref().unwrap_or(&empty);
                                     let snapshot = source == 0 && frame["kind"] == "snapshot";
                                     if git_event {
+                                        let old_error = git_error.clone();
+                                        let unavailable = frame["kind"] == "native-git-error";
+                                        git_error = unavailable
+                                            .then(|| "Git status unavailable. Retrying…".into());
                                         let changed = match GitStats::apply(
                                             &mut git,
-                                            (!frame.is_null()).then_some(frame),
+                                            (!frame.is_null() && !unavailable).then_some(frame),
                                         ) {
                                             Ok(changed) => changed,
                                             Err(_) => {
                                                 tracing::warn!(
                                                     "invalid T3 Git status; clearing native counts"
                                                 );
+                                                git_error =
+                                                    Some("Git status could not be read.".into());
                                                 git.take().is_some()
                                             }
                                         };
-                                        if !changed {
+                                        if !changed && old_error == git_error {
                                             return Ok(None);
                                         }
                                     } else if snapshot {
@@ -1353,6 +1382,7 @@ impl RpcService for T3Service {
                                         let mut details =
                                             projection.details_with_shell(&shell, &providers)?;
                                         details.git = git.clone();
+                                        details.git_error = git_error.clone();
                                         Some(details)
                                     } else {
                                         None
@@ -1362,7 +1392,11 @@ impl RpcService for T3Service {
                                         projection.value["thread"]["projectId"]
                                             == workspace_binding.0
                                             && projection.value["thread"]["worktreePath"]
-                                                == workspace_binding.1,
+                                                == workspace_binding.1
+                                            && thread_workspace(
+                                                &projection.value["thread"],
+                                                &shell
+                                            ) == workspace_binding.2,
                                         "T3 workspace changed; resubscribe"
                                     );
                                     let baseline = if snapshot || shell_event {
@@ -1432,6 +1466,7 @@ impl RpcService for T3Service {
                                                 workspace_binding,
                                                 history_pending,
                                                 previous_details,
+                                                git_error,
                                             ),
                                         ));
                                     }
@@ -1459,12 +1494,17 @@ impl RpcService for T3Service {
             | methods::RESIZE_TERMINAL
             | methods::CLOSE_TERMINAL
             | methods::SUBSCRIBE_TERMINAL
-            | "T3OpenInEditor"
-            | "T3InitializeGit" => self.workspace(method, params).await,
+            | "T3OpenInEditor" => self.workspace(method, params).await,
             methods::WATCH_CHECKOUT_DIFFS
             | methods::GET_CHECKOUT_DIFF
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
-            | methods::LIST_BRANCHES => self.git(method, params).await,
+            | methods::LIST_BRANCHES
+            | "T3RefreshGit"
+            | "T3ListGitBranches"
+            | "T3CheckoutBranch"
+            | "T3PushGit"
+            | "T3CreatePullRequest"
+            | "T3InitializeGit" => self.git(method, params).await,
             // ponytail: add remaining native controls with their T3 RPC mapping; never fall through to Zeron's engine.
             _ => Err(RpcError::UnknownMethod(format!(
                 "{method} (not yet migrated to T3)"
@@ -1476,6 +1516,61 @@ impl RpcService for T3Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_workspace_tracks_project_moves_and_worktree_handoffs() {
+        let mut shell = Shell::default();
+        shell.projects = vec![json!({"id":"project","workspaceRoot":"/first"})];
+        let mut thread = json!({"projectId":"project","worktreePath":null});
+        assert_eq!(thread_workspace(&thread, &shell).as_deref(), Some("/first"));
+        shell.projects[0]["workspaceRoot"] = json!("/second");
+        assert_eq!(
+            thread_workspace(&thread, &shell).as_deref(),
+            Some("/second")
+        );
+        thread["worktreePath"] = json!("/worktree");
+        assert_eq!(
+            thread_workspace(&thread, &shell).as_deref(),
+            Some("/worktree")
+        );
+        shell.projects.clear();
+        assert_eq!(
+            thread_workspace(&thread, &shell).as_deref(),
+            Some("/worktree")
+        );
+        thread["worktreePath"] = Value::Null;
+        assert_eq!(thread_workspace(&thread, &shell), None);
+    }
+
+    #[tokio::test]
+    async fn git_subscription_reports_failure_then_recovers_with_remote_status() {
+        struct RetryGit(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl RpcService for RetryGit {
+            async fn handle(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
+                assert_eq!(method, "subscribeVcsStatus");
+                assert_eq!(params, json!({"cwd":"/fixture","includeRemote":true}));
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return Err(RpcError::BadParams("temporary failure".into()));
+                }
+                Ok(RpcReply::Stream(Box::pin(
+                    stream::once(async { json!({"type":"snapshot","status":"fixture"}) })
+                        .chain(stream::pending()),
+                )))
+            }
+        }
+        let service = Arc::new(RetryGit(std::sync::atomic::AtomicUsize::new(0)));
+        let client = Arc::new(zeron_rpc::memory_client(service.clone()));
+        let mut events = Box::pin(vcs_events(client, Some("/fixture".into())));
+        let failed = events.next().await.unwrap();
+        assert_eq!(failed.1.unwrap()["kind"], "native-git-error");
+        let recovered = tokio::time::timeout(Duration::from_secs(5), events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.1.unwrap()["type"], "snapshot");
+        assert_eq!(service.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn runtime_changes_are_explicit_and_new_threads_default_to_approval_required() {

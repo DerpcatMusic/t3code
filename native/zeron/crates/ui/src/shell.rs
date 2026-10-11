@@ -1947,6 +1947,7 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    t3_providers_page: Option<Entity<crate::settings::t3_providers::ProvidersPage>>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
@@ -2275,6 +2276,12 @@ impl Shell {
                         s.selected_chat
                             .as_deref()
                             .is_some_and(|id| s.indicator_for(id, Utc::now()) != Indicator::None)
+                            || (shell.t3_panel_visible(cx)
+                                && s.t3_details.get(&shell.active_chat).is_some_and(|details| {
+                                    details.agents.iter().any(|agent| {
+                                        agent.status.is_active() && agent.started_at.is_some()
+                                    })
+                                }))
                             // The connection pill's retry countdown needs the
                             // same per-second refresh while degraded.
                             || matches!(
@@ -2452,6 +2459,7 @@ impl Shell {
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
+            t3_providers_page: None,
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
@@ -4866,6 +4874,7 @@ impl Shell {
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
+            self.t3_providers_page = None;
         }
         if !matches!(self.route, Route::Settings(_)) {
             self.settings_focus_pending = true;
@@ -4875,6 +4884,15 @@ impl Shell {
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
+    }
+
+    pub(super) fn open_native_t3_providers(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.t3_panel.host_menu = false;
+        self.open_settings(SettingsSection::Harnesses, cx);
     }
 
     /// Generic entry points (⌘, / Ctrl+,, the footer gear, the palette,
@@ -4919,10 +4937,15 @@ impl Shell {
                 .devices_page
                 .as_ref()
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
-            SettingsSection::Harnesses => self
-                .harnesses_page
-                .as_ref()
-                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
+            SettingsSection::Harnesses => {
+                if let Some(page) = self.t3_providers_page.as_ref() {
+                    page.update(cx, |page, cx| page.dismiss_on_escape(cx))
+                } else {
+                    self.harnesses_page
+                        .as_ref()
+                        .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx)))
+                }
+            }
             SettingsSection::Appearance => self
                 .appearance_page
                 .as_ref()
@@ -4992,26 +5015,32 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if std::env::var_os("ZERON_T3_CONNECTION").is_some() {
+            if section.canonical() == SettingsSection::Harnesses {
+                if self.t3_providers_page.is_none() {
+                    let state = self.state.clone();
+                    self.t3_providers_page =
+                        Some(cx.new(|cx| {
+                            crate::settings::t3_providers::ProvidersPage::new(state, cx)
+                        }));
+                }
+                return self
+                    .t3_providers_page
+                    .as_ref()
+                    .unwrap()
+                    .clone()
+                    .into_any_element();
+            }
             let route = match section {
                 SettingsSection::Devices | SettingsSection::Agents => {
                     Some(crate::browser::T3SettingsRoute::Connections)
                 }
-                SettingsSection::Harnesses => Some(crate::browser::T3SettingsRoute::Providers),
                 _ => None,
             };
             if let Some(route) = route {
-                let (title, detail) = if matches!(route, crate::browser::T3SettingsRoute::Providers)
-                {
-                    (
-                        "Open T3 providers",
-                        "Manage provider connections and models with T3.",
-                    )
-                } else {
-                    (
-                        "Open T3 Connect",
-                        "Sign in, pair devices, and manage remote connections with T3.",
-                    )
-                };
+                let (title, detail) = (
+                    "Open T3 Connect",
+                    "Sign in, pair devices, and manage remote connections with T3.",
+                );
                 return div()
                     .flex()
                     .flex_col()

@@ -113,6 +113,7 @@ jobs:
           LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib queue::tests -j2
           LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_settings::tests -j2
           LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_panel_logic_tests -j2
+          LD_LIBRARY_PATH="$ORT_LIB_LOCATION" cargo test --release --locked -p zeron-ui --lib t3_providers::tests -j2
       - name: Native desktop
         run: cargo build --release --locked -p zeron --bin zeron -j2
       - name: Separate preference paths
@@ -122,7 +123,7 @@ jobs:
           native_bundle="$RUNNER_TEMP/z3-code-linux-x64"
           mkdir -p "$native_bundle/lib"
           cp target/release/zeron "$native_bundle/zeron"
-          cp target/release/examples/smoke target/release/examples/exercise target/release/examples/sidebar target/release/examples/features "$native_bundle/"
+          cp target/release/examples/smoke target/release/examples/exercise target/release/examples/sidebar target/release/examples/features target/release/examples/providers "$native_bundle/"
           cp ../launch-t3 "$native_bundle/z3-code"
           cp ../connect-local.py "$native_bundle/connect-local.py"
           chmod +x "$native_bundle/z3-code"
@@ -162,4 +163,4 @@ jobs:
             z3-code-linux-x64.tar.gz z3-code-linux-x64.tar.gz.sha256 \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
             --title "Z3-code ${GITHUB_SHA:0:8}" \
-            --notes 'Linux x64. Zeron native UI with the T3 Code backend. Start T3, then run z3-code.'
+            --notes 'Linux x64. Zeron native UI on the local T3 Code backend. Run z3-code; it reuses or starts your installed T3 server.'

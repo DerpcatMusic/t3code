@@ -13,7 +13,8 @@ const PANEL_PAGE_SIZE: usize = 5;
 
 pub(super) struct T3PanelState {
     chat_id: String,
-    host_menu: bool,
+    workspace_path: String,
+    pub(super) host_menu: bool,
     editor_menu: bool,
     scripts_open: bool,
     lineage_open: bool,
@@ -22,12 +23,20 @@ pub(super) struct T3PanelState {
     lineage_page: usize,
     previous_page: usize,
     stopping_child: Option<String>,
+    git_busy: bool,
+    branches_open: bool,
+    branches_loading: bool,
+    branches: Vec<String>,
+    branches_error: Option<String>,
+    branches_cursor: Option<u64>,
+    branches_page: usize,
 }
 
 impl Default for T3PanelState {
     fn default() -> Self {
         Self {
             chat_id: String::new(),
+            workspace_path: String::new(),
             host_menu: false,
             editor_menu: false,
             scripts_open: false,
@@ -37,6 +46,13 @@ impl Default for T3PanelState {
             lineage_page: 0,
             previous_page: 0,
             stopping_child: None,
+            git_busy: false,
+            branches_open: false,
+            branches_loading: false,
+            branches: Vec::new(),
+            branches_error: None,
+            branches_cursor: None,
+            branches_page: 0,
         }
     }
 }
@@ -636,7 +652,15 @@ impl Shell {
         .detach();
     }
 
-    fn t3_project_command(&mut self, method: &'static str, cx: &mut Context<Self>) {
+    fn t3_project_command(
+        &mut self,
+        method: &'static str,
+        ref_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.t3_panel.git_busy {
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -644,22 +668,97 @@ impl Shell {
             return;
         }
         let chat = self.active_chat.clone();
+        self.t3_panel.git_busy = true;
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
-                .call(method, serde_json::json!({"chatId":chat}))
+                .call(
+                    method,
+                    serde_json::json!({"chatId":chat,"refName":ref_name}),
+                )
                 .await;
             this.update(cx, |shell, cx| {
+                shell.t3_panel.git_busy = false;
                 shell.sidebar_notice = Some(match result {
-                    Ok(_) => {
-                        if method == "T3InitializeGit" {
-                            "Git initialized".into()
-                        } else {
-                            "Opened in Zed".into()
-                        }
+                    Ok(value) => {
+                        shell.t3_panel.branches_open = false;
+                        value["toast"]["title"]
+                            .as_str()
+                            .unwrap_or(match method {
+                                "T3InitializeGit" => "Git initialized",
+                                "T3RefreshGit" => "Git status refreshed",
+                                "T3CheckoutBranch" => "Branch checked out",
+                                "T3PushGit" => "Push completed",
+                                "T3CreatePullRequest" => "Pull request created",
+                                _ => "Opened in Zed",
+                            })
+                            .to_owned()
+                            .into()
                     }
                     Err(error) => format!("Project action failed: {error}").into(),
                 });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn load_t3_branches(&mut self, cursor: Option<u64>, cx: &mut Context<Self>) {
+        if self.t3_panel.branches_loading || self.active_chat.is_empty() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let chat = self.active_chat.clone();
+        let workspace = self.t3_panel.workspace_path.clone();
+        self.t3_panel.branches_open = true;
+        self.t3_panel.branches_loading = true;
+        self.t3_panel.branches_error = None;
+        if cursor.is_none() {
+            self.t3_panel.branches.clear();
+            self.t3_panel.branches_page = 0;
+            self.t3_panel.branches_cursor = None;
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    "T3ListGitBranches",
+                    serde_json::json!({"chatId":chat,"cursor":cursor}),
+                )
+                .await;
+            this.update(cx, |shell, cx| {
+                if shell.active_chat != chat || shell.t3_panel.workspace_path != workspace {
+                    return;
+                }
+                shell.t3_panel.branches_loading = false;
+                match result {
+                    Ok(value) => match value["refs"].as_array() {
+                        Some(refs) => {
+                            for name in refs
+                                .iter()
+                                .filter_map(|reference| reference["name"].as_str())
+                            {
+                                if !shell.t3_panel.branches.iter().any(|branch| branch == name) {
+                                    shell.t3_panel.branches.push(name.to_owned());
+                                }
+                            }
+                            shell.t3_panel.branches_cursor = value["nextCursor"].as_u64();
+                        }
+                        None => {
+                            shell.t3_panel.branches_error =
+                                Some("Invalid branch list from server".into())
+                        }
+                    },
+                    Err(error) => {
+                        shell.t3_panel.branches_error =
+                            Some(format!("Could not load branches: {error}"))
+                    }
+                }
                 cx.notify();
             })
             .ok();
@@ -778,6 +877,7 @@ impl Shell {
         let child = agent.child_thread_id.clone();
         let can_open = child.is_some() && !agent.missing;
         let mut content = panel_control(&theme, format!("t3-agent-open-{}", agent.id))
+            .h(px(40.0))
             .flex_1()
             .child(
                 icon(agent_provider_icon(&agent.driver))
@@ -789,8 +889,23 @@ impl Shell {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .truncate()
-                    .child(SharedString::from(title.clone())),
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(SharedString::from(title.clone())))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(10.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(
+                                agent
+                                    .model
+                                    .as_deref()
+                                    .filter(|model| !model.trim().is_empty())
+                                    .unwrap_or("Model not reported")
+                                    .to_owned(),
+                            )),
+                    ),
             )
             .child(
                 div()
@@ -863,9 +978,11 @@ impl Shell {
         self.ensure_project_actions(cx);
         if self.t3_panel.chat_id != self.active_chat {
             let stopping_child = self.t3_panel.stopping_child.take();
+            let git_busy = self.t3_panel.git_busy;
             self.t3_panel = T3PanelState {
                 chat_id: self.active_chat.clone(),
                 stopping_child,
+                git_busy,
                 ..Default::default()
             };
         }
@@ -880,6 +997,15 @@ impl Shell {
             .selected_chat_row()
             .and_then(|chat| chat.cwd.clone())
             .unwrap_or_default();
+        if self.t3_panel.workspace_path != path {
+            self.t3_panel.workspace_path = path.clone();
+            self.t3_panel.branches_open = false;
+            self.t3_panel.branches_loading = false;
+            self.t3_panel.branches.clear();
+            self.t3_panel.branches_cursor = None;
+            self.t3_panel.branches_error = None;
+            self.t3_panel.branches_page = 0;
+        }
         let details = state.t3_details.get(&self.active_chat).cloned();
         let actions = self
             .project_actions
@@ -991,11 +1117,7 @@ impl Shell {
                         .child(icon(icons::BOT).size(px(14.0)).text_color(theme.text_muted))
                         .child("Providers")
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_t3_settings_route(
-                                crate::browser::T3SettingsRoute::Providers,
-                                window,
-                                cx,
-                            );
+                            this.open_native_t3_providers(window, cx);
                         })),
                 );
         }
@@ -1012,7 +1134,7 @@ impl Shell {
                         .child("Open in Zed")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.t3_panel.editor_menu = false;
-                            this.t3_project_command("T3OpenInEditor", cx);
+                            this.t3_project_command("T3OpenInEditor", None, cx);
                         })),
                 )
                 .child(
@@ -1188,75 +1310,284 @@ impl Shell {
         }
         card = card.child(div().h(px(1.0)).mx(px(8.0)).my(px(5.0)).bg(theme.border));
         if let Some(details) = &details {
-            if let Some(branch) = details
-                .git
-                .as_ref()
-                .and_then(|g| g.branch.as_ref())
-                .or(details.branch.as_ref())
-            {
-                let copy_branch = branch.clone();
+            let busy = self.t3_panel.git_busy;
+            if let Some(error) = &details.git_error {
                 card = card.child(
-                    panel_control(&theme, "t3-project-branch")
+                    panel_control(&theme, "t3-git-error")
                         .child(
                             icon(icons::GIT_BRANCH)
                                 .size(px(14.0))
-                                .text_color(theme.text_muted),
+                                .text_color(theme.danger),
                         )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .truncate()
-                                .child(SharedString::from(branch.clone())),
-                        )
-                        .child(
-                            icon(icons::COPY)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .tooltip(crate::settings::widgets::text_tooltip("Copy branch name"))
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                copy_branch.clone(),
-                            ))
+                        .child("Git unavailable · Retry")
+                        .tooltip(crate::settings::widgets::text_tooltip(error.clone()))
+                        .when(busy, |el| el.cursor_default().opacity(0.45))
+                        .when(!busy, |el| {
+                            el.on_click(cx.listener(|this, _, _, cx| {
+                                this.t3_project_command("T3RefreshGit", None, cx)
+                            }))
                         }),
                 );
-            }
-            if let Some(git) = &details.git {
-                card = card.child(
-                    panel_control(&theme, "t3-project-diff")
-                        .child(
-                            icon(icons::GIT_BRANCH)
-                                .size(px(14.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(div().flex_1().child("Changes"))
-                        .child(
-                            div()
-                                .text_color(theme.success)
-                                .child(SharedString::from(format!("+{}", git.additions))),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.danger)
-                                .child(SharedString::from(format!("−{}", git.deletions))),
-                        )
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.add_diff_surface(window, cx)),
+            } else if let Some(git) = &details.git {
+                if git.is_repo {
+                    card = card.child(
+                        panel_control(&theme, "t3-project-branch")
+                            .child(
+                                icon(icons::GIT_BRANCH)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(div().flex_1().min_w(px(0.0)).truncate().child(
+                                SharedString::from(
+                                    git.branch.clone().unwrap_or_else(|| "Detached HEAD".into()),
+                                ),
+                            ))
+                            .child(
+                                icon(icons::ALT_ARROW_DOWN)
+                                    .size(px(10.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .tooltip(crate::settings::widgets::text_tooltip("Choose a branch"))
+                            .when(busy, |el| el.cursor_default().opacity(0.45))
+                            .when(!busy, |el| {
+                                el.on_click(cx.listener(|this, _, _, cx| {
+                                    if this.t3_panel.branches_open {
+                                        this.t3_panel.branches_open = false;
+                                        cx.notify();
+                                    } else {
+                                        this.load_t3_branches(None, cx);
+                                    }
+                                }))
+                            }),
+                    );
+                    if self.t3_panel.branches_open {
+                        if let Some(branch) = &git.branch {
+                            let branch = branch.clone();
+                            card = card.child(
+                                panel_control(&theme, "t3-copy-branch")
+                                    .child(
+                                        icon(icons::COPY)
+                                            .size(px(12.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child("Copy branch name")
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            branch.clone(),
+                                        ))
+                                    }),
+                            );
+                        }
+                        if let Some(error) = &self.t3_panel.branches_error {
+                            card = card.child(
+                                panel_control(&theme, "t3-branches-retry")
+                                    .child("Could not load branches · Retry")
+                                    .tooltip(crate::settings::widgets::text_tooltip(error.clone()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.load_t3_branches(None, cx)
+                                    })),
+                            );
+                        }
+                        let can_checkout =
+                            !busy && !git.has_working_tree_changes && details.active_agents == 0;
+                        for index in
+                            panel_page(self.t3_panel.branches.len(), self.t3_panel.branches_page)
+                        {
+                            let branch = self.t3_panel.branches[index].clone();
+                            let selected = git.branch.as_ref() == Some(&branch);
+                            card = card.child(panel_control(&theme, format!("t3-checkout-{index}"))
+                                .child(icon(icons::GIT_BRANCH).size(px(12.0)).text_color(theme.text_muted))
+                                .child(div().truncate().child(SharedString::from(branch.clone())))
+                                .tooltip(crate::settings::widgets::text_tooltip(if !can_checkout {
+                                    "Stop agents and commit or stash changes before switching branches".to_owned()
+                                } else { format!("Check out {branch}") }))
+                                .when(!can_checkout || selected, |el| el.cursor_default().opacity(0.45))
+                                .when(can_checkout && !selected, |el| el.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.t3_project_command("T3CheckoutBranch", Some(branch.clone()), cx)
+                                }))));
+                        }
+                        card = card.child(self.render_t3_panel_pager(
+                            "branches",
+                            self.t3_panel.branches.len(),
+                            self.t3_panel.branches_page,
+                            cx,
+                        ));
+                        if self.t3_panel.branches_loading {
+                            card = card.child(
+                                div()
+                                    .px(px(8.0))
+                                    .py(px(6.0))
+                                    .text_color(theme.text_muted)
+                                    .child("Loading branches…"),
+                            );
+                        } else if let Some(cursor) = self.t3_panel.branches_cursor {
+                            card = card.child(
+                                panel_control(&theme, "t3-more-branches")
+                                    .child("Load more branches")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.load_t3_branches(Some(cursor), cx)
+                                    })),
+                            );
+                        }
+                    }
+                    card =
+                        card.child(
+                            panel_control(&theme, "t3-working-tree")
+                                .child(
+                                    icon(icons::GIT_BRANCH)
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(div().flex_1().min_w(px(0.0)).truncate().child(
+                                    SharedString::from(if git.has_working_tree_changes {
+                                        format!("Working tree · {} files", git.working_tree_files)
+                                    } else {
+                                        "Working tree clean".into()
+                                    }),
+                                ))
+                                .child(div().text_color(theme.success).child(SharedString::from(
+                                    format!("+{}", git.working_tree_additions),
+                                )))
+                                .child(div().text_color(theme.danger).child(SharedString::from(
+                                    format!("−{}", git.working_tree_deletions),
+                                )))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_diff_surface(window, cx)
+                                })),
+                        );
+                    card =
+                        card.child(
+                            panel_control(&theme, "t3-project-diff")
+                                .child(
+                                    icon(icons::GIT_BRANCH)
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(div().flex_1().child("Changes"))
+                                .child(
+                                    div()
+                                        .text_color(theme.success)
+                                        .child(SharedString::from(format!("+{}", git.additions))),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(theme.danger)
+                                        .child(SharedString::from(format!("−{}", git.deletions))),
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_diff_surface(window, cx)
+                                })),
+                        );
+                    let remote_label = match &git.remote {
+                        Some(remote) => format!(
+                            "{} ahead · {} behind{}",
+                            remote.ahead_count,
+                            remote.behind_count,
+                            if remote.has_upstream {
+                                ""
+                            } else {
+                                " · No upstream"
+                            }
                         ),
-                );
+                        None => "Loading remote status…".into(),
+                    };
+                    card = card.child(
+                        panel_control(&theme, "t3-remote-status")
+                            .child(
+                                icon(icons::GIT_BRANCH)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .child(SharedString::from(remote_label)),
+                            )
+                            .tooltip(crate::settings::widgets::text_tooltip("Refresh Git status"))
+                            .when(busy, |el| el.cursor_default().opacity(0.45))
+                            .when(!busy, |el| {
+                                el.on_click(cx.listener(|this, _, _, cx| {
+                                    this.t3_project_command("T3RefreshGit", None, cx)
+                                }))
+                            }),
+                    );
+                    if let Some(pr) = git.remote.as_ref().and_then(|remote| remote.pr.as_ref()) {
+                        let url = pr.url.clone();
+                        card = card.child(
+                            panel_control(&theme, "t3-pull-request")
+                                .child(
+                                    icon(icons::GIT_BRANCH)
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(div().truncate().child(SharedString::from(format!(
+                                    "PR #{} · {}",
+                                    pr.number, pr.state
+                                ))))
+                                .tooltip(crate::settings::widgets::text_tooltip(pr.title.clone()))
+                                .on_click(move |_, _, cx| cx.open_url(&url)),
+                        );
+                    }
+                    for (method, label, reason) in [
+                        ("T3PushGit", "Push", git.push_disabled_reason()),
+                        ("T3CreatePullRequest", "Create PR", git.pr_disabled_reason()),
+                    ] {
+                        card = card.child(
+                            panel_control(&theme, method)
+                                .child(
+                                    icon(icons::GIT_BRANCH)
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(if busy {
+                                    "Git action in progress…"
+                                } else {
+                                    label
+                                })
+                                .tooltip(crate::settings::widgets::text_tooltip(
+                                    reason.unwrap_or(label),
+                                ))
+                                .when(busy || reason.is_some(), |el| {
+                                    el.cursor_default().opacity(0.45)
+                                })
+                                .when(!busy && reason.is_none(), |el| {
+                                    el.on_click(cx.listener(move |this, _, _, cx| {
+                                        this.t3_project_command(method, None, cx)
+                                    }))
+                                }),
+                        );
+                    }
+                } else {
+                    card = card.child(
+                        panel_control(&theme, "t3-initialize-git")
+                            .child(
+                                icon(icons::GIT_BRANCH)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(if busy {
+                                "Initializing Git…"
+                            } else {
+                                "Initialize Git"
+                            })
+                            .when(busy, |el| el.cursor_default().opacity(0.45))
+                            .when(!busy, |el| {
+                                el.on_click(cx.listener(|this, _, _, cx| {
+                                    this.t3_project_command("T3InitializeGit", None, cx)
+                                }))
+                            }),
+                    );
+                }
             } else {
                 card = card.child(
-                    panel_control(&theme, "t3-initialize-git")
-                        .child(
-                            icon(icons::GIT_BRANCH)
-                                .size(px(14.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child("Initialize Git")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.t3_project_command("T3InitializeGit", cx)
-                        })),
+                    div()
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child("Loading Git status…"),
                 );
             }
             let active: Vec<_> = details
@@ -1450,6 +1781,7 @@ impl Shell {
                             let page = match group {
                                 "scripts" => &mut this.t3_panel.scripts_page,
                                 "previous" => &mut this.t3_panel.previous_page,
+                                "branches" => &mut this.t3_panel.branches_page,
                                 _ => &mut this.t3_panel.lineage_page,
                             };
                             *page = current - 1;
@@ -1481,6 +1813,7 @@ impl Shell {
                             let page = match group {
                                 "scripts" => &mut this.t3_panel.scripts_page,
                                 "previous" => &mut this.t3_panel.previous_page,
+                                "branches" => &mut this.t3_panel.branches_page,
                                 _ => &mut this.t3_panel.lineage_page,
                             };
                             *page = current + 1;
